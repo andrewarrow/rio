@@ -145,20 +145,22 @@ pub struct TabStripLayout {
 }
 
 /// Compute the tab strip layout from the physical window width.
-/// `max_tab_width` comes from `navigation.max-tab-width` (logical px).
+/// `max_tab_width` and `content_left` are logical pixels; the latter keeps
+/// tabs and their hit targets out from under persistent left-side chrome.
 pub fn tab_strip_layout(
     window_width: f32,
     scale_factor: f32,
     num_tabs: usize,
     max_tab_width: f32,
+    content_left: f32,
 ) -> TabStripLayout {
     #[cfg(target_os = "macos")]
-    let left_margin = ISLAND_MARGIN_LEFT_MACOS;
+    let left_margin = content_left.max(ISLAND_MARGIN_LEFT_MACOS);
     #[cfg(not(target_os = "macos"))]
-    let left_margin = 0.0;
+    let left_margin = content_left;
 
     let available_width =
-        (window_width / scale_factor) - ISLAND_MARGIN_RIGHT - left_margin;
+        ((window_width / scale_factor) - ISLAND_MARGIN_RIGHT - left_margin).max(0.0);
     let tab_width =
         (available_width / num_tabs.max(1) as f32).clamp(0.0, max_tab_width.max(0.0));
     TabStripLayout {
@@ -276,7 +278,9 @@ fn single_title_x(
     text_width: f32,
     left_margin: f32,
 ) -> f32 {
-    (((window_width / scale_factor) - text_width) / 2.0).max(left_margin + TAB_PADDING_X)
+    let right = (window_width / scale_factor) - ISLAND_MARGIN_RIGHT;
+    let available_width = (right - left_margin).max(0.0);
+    (left_margin + (available_width - text_width) / 2.0).max(left_margin + TAB_PADDING_X)
 }
 
 #[inline]
@@ -836,8 +840,13 @@ impl Island {
         self.slide_springs
             .retain(|_, s| s.update(dt, DRAG_ANIMATION_LENGTH));
 
-        let layout =
-            tab_strip_layout(window_width, scale_factor, num_tabs, self.max_tab_width);
+        let layout = tab_strip_layout(
+            window_width,
+            scale_factor,
+            num_tabs,
+            self.max_tab_width,
+            context_manager.drawer_width(),
+        );
         let TabStripLayout {
             left_margin,
             tab_width,
@@ -1252,6 +1261,7 @@ impl Island {
             scale_factor,
             tab_indices.len(),
             self.max_tab_width,
+            context_manager.drawer_width(),
         );
         let Some(picker_slot) = tab_indices.iter().position(|&tab| tab == picker_tab)
         else {
@@ -1559,15 +1569,19 @@ mod tests {
     /// 2x display and nothing appeared at all.
     #[test]
     fn single_title_is_centred_in_logical_pixels() {
-        // 1600 physical at 2x is an 800pt strip, so a 100pt title starts at
+        // 1600 physical at 2x is an 800pt strip, so a 100pt title starts near
         // 350, not at 750 (which would be centred on the physical width and
-        // sit past the right edge).
+        // sit past the right edge). The 8pt right inset makes it 346 exactly.
         let x = single_title_x(1600.0, 2.0, 100.0, 0.0);
-        assert_eq!(x, 350.0);
+        assert_eq!(x, 346.0);
         assert!(x + 100.0 <= 800.0, "title must stay on screen: {x}");
 
         // At 1x the two agree, which is why this only showed up on retina.
-        assert_eq!(single_title_x(800.0, 1.0, 100.0, 0.0), 350.0);
+        assert_eq!(single_title_x(800.0, 1.0, 100.0, 0.0), 346.0);
+
+        // With a drawer, centre in the remaining content area rather than
+        // behind the drawer or across the whole window.
+        assert_eq!(single_title_x(1600.0, 2.0, 100.0, 220.0), 456.0);
     }
 
     #[test]
@@ -1600,7 +1614,7 @@ mod tests {
     /// is the point of dropping the island.
     #[test]
     fn single_title_budget_beats_a_tab_slot() {
-        let slot = tab_strip_layout(1600.0, 2.0, 1, 240.0).tab_width;
+        let slot = tab_strip_layout(1600.0, 2.0, 1, 240.0, 0.0).tab_width;
         let slot_budget = (slot - TAB_PADDING_X * 2.0).max(0.0);
         assert!(
             single_title_budget(1600.0, 2.0, 0.0) > slot_budget,
@@ -1878,7 +1892,7 @@ mod tests {
         // 1000 physical px @ 2x scale → 500 logical px window. Slots
         // stay below the cap here, so the math matches the old
         // fill-the-strip layout.
-        let layout = tab_strip_layout(1000.0, 2.0, 4, 240.0);
+        let layout = tab_strip_layout(1000.0, 2.0, 4, 240.0, 0.0);
         #[cfg(target_os = "macos")]
         {
             assert_eq!(layout.left_margin, ISLAND_MARGIN_LEFT_MACOS);
@@ -1892,19 +1906,19 @@ mod tests {
             assert_eq!(layout.tabs_width, 492.0);
         }
         // Zero tabs clamps the divisor.
-        assert!(tab_strip_layout(1000.0, 2.0, 0, 240.0)
+        assert!(tab_strip_layout(1000.0, 2.0, 0, 240.0, 0.0)
             .tab_width
             .is_finite());
     }
 
     #[test]
     fn tab_strip_layout_caps_slot_width() {
-        let layout = tab_strip_layout(3000.0, 2.0, 2, 240.0);
+        let layout = tab_strip_layout(3000.0, 2.0, 2, 240.0, 0.0);
         assert_eq!(layout.tab_width, 240.0);
         assert_eq!(layout.tabs_width, 480.0);
 
         // The cap is configurable via navigation.max-tab-width.
-        let layout = tab_strip_layout(3000.0, 2.0, 2, 280.0);
+        let layout = tab_strip_layout(3000.0, 2.0, 2, 280.0, 0.0);
         assert_eq!(layout.tab_width, 280.0);
         assert_eq!(layout.tabs_width, 560.0);
         // The tabs region ends well before the 1500 logical px strip.
@@ -1912,9 +1926,17 @@ mod tests {
 
         // Pathologically narrow window: width clamps at 0 instead of
         // going negative.
-        let layout = tab_strip_layout(10.0, 2.0, 4, 240.0);
+        let layout = tab_strip_layout(10.0, 2.0, 4, 240.0, 0.0);
         assert_eq!(layout.tab_width, 0.0);
         assert_eq!(layout.tabs_width, 0.0);
+    }
+
+    #[test]
+    fn tab_strip_layout_starts_after_the_drawer() {
+        let layout = tab_strip_layout(1600.0, 2.0, 2, 240.0, 220.0);
+        assert_eq!(layout.left_margin, 220.0);
+        assert_eq!(layout.tab_width, 240.0);
+        assert!(layout.left_margin + layout.tabs_width <= 800.0);
     }
 
     #[test]

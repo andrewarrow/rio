@@ -1814,6 +1814,14 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     return;
                 }
 
+                if let Some(cursor) = route.window.screen.workspace_cursor_icon() {
+                    if route.window.screen.clear_close_button_hover() {
+                        route.request_redraw();
+                    }
+                    route.window.winit_window.set_cursor(cursor);
+                    return;
+                }
+
                 if route.window.screen.update_close_button_hover(x, y) {
                     route.request_redraw();
                 }

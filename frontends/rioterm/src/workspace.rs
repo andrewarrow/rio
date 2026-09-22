@@ -5,10 +5,76 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_DRAWER_WIDTH: f32 = 220.0;
 pub const MIN_DRAWER_WIDTH: f32 = 160.0;
 pub const MAX_DRAWER_WIDTH: f32 = 420.0;
+pub const DRAWER_HEADER_HEIGHT: f32 = 48.0;
+pub const DRAWER_ROW_TOP: f32 = 51.0;
+pub const DRAWER_ROW_HEIGHT: f32 = 42.0;
+pub const DRAWER_ROW_STRIDE: f32 = 48.0;
+pub const DRAWER_RESIZE_HIT_HALF_WIDTH: f32 = 4.0;
+pub const DRAWER_ADD_HIT_WIDTH: f32 = 44.0;
 
 const DEFAULT_WORKSPACE_NAME: &str = "Main";
 const PERSISTED_STATE_VERSION: u32 = 1;
 const MAX_RESTORED_TABS: usize = 28;
+
+fn standardized_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut standardized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    standardized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    standardized.pop();
+                } else if !path.is_absolute() {
+                    standardized.push(component.as_os_str());
+                }
+            }
+            _ => standardized.push(component.as_os_str()),
+        }
+    }
+    standardized
+}
+
+/// Match simple-cmux's tab label: once OSC 7 reports a directory, show its
+/// last path component and keep the full path only for roots or other paths
+/// without a terminal component.
+pub(crate) fn tab_title_for_directory(directory: &Path) -> String {
+    let directory = standardized_path(directory);
+    directory
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| directory.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Match simple-cmux's workspace label. A workspace rooted under the user's
+/// home is named for the first directory below home; other paths use their
+/// last component. The caller supplies the first tab's directory.
+pub(crate) fn workspace_title_for_directory(
+    directory: &Path,
+    home: Option<&Path>,
+) -> String {
+    let directory = standardized_path(directory);
+    let home = home.map(standardized_path);
+    if let Some(relative) = home
+        .as_deref()
+        .and_then(|home| directory.strip_prefix(home).ok())
+    {
+        if relative.as_os_str().is_empty() {
+            return String::from("~");
+        }
+        if let Some(component) = relative.components().next() {
+            return component.as_os_str().to_string_lossy().into_owned();
+        }
+    }
+
+    tab_title_for_directory(&directory)
+}
 
 #[derive(Debug, Clone)]
 pub struct Workspace {
@@ -352,7 +418,52 @@ impl Default for WorkspaceManager {
 
 #[cfg(test)]
 mod tests {
-    use super::WorkspaceManager;
+    use super::{
+        standardized_path, tab_title_for_directory, workspace_title_for_directory,
+        WorkspaceManager,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn tab_titles_use_the_last_pwd_component() {
+        assert_eq!(
+            tab_title_for_directory(Path::new("/Users/aa/os/rio")),
+            "rio"
+        );
+        assert_eq!(tab_title_for_directory(Path::new("/")), "/");
+        assert_eq!(
+            tab_title_for_directory(Path::new("/Users/aa/os/../rio")),
+            "rio"
+        );
+        assert_eq!(
+            standardized_path(Path::new("../../rio")),
+            Path::new("../../rio")
+        );
+    }
+
+    #[test]
+    fn workspace_titles_use_the_first_directory_below_home() {
+        let home = Path::new("/Users/aa");
+        assert_eq!(
+            workspace_title_for_directory(Path::new("/Users/aa/os/rio"), Some(home)),
+            "os"
+        );
+        assert_eq!(
+            workspace_title_for_directory(Path::new("/Users/aa"), Some(home)),
+            "~"
+        );
+        assert_eq!(
+            workspace_title_for_directory(Path::new("/tmp/rio"), Some(home)),
+            "rio"
+        );
+        assert_eq!(
+            workspace_title_for_directory(
+                Path::new("/Users/aa/os/../rio/project"),
+                Some(home)
+            ),
+            "rio"
+        );
+    }
 
     #[test]
     fn removing_a_tab_keeps_workspace_indices_consistent() {

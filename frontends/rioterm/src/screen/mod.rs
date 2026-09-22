@@ -30,7 +30,11 @@ use crate::renderer::island::{self, TabStripLayout, ISLAND_HEIGHT};
 use crate::renderer::{utils::padding_top_from_config, Renderer};
 use crate::screen::hint::HintMatches;
 use crate::selection::{Selection, SelectionType};
-use crate::workspace::{DEFAULT_DRAWER_WIDTH, MAX_DRAWER_WIDTH, MIN_DRAWER_WIDTH};
+use crate::workspace::{
+    DEFAULT_DRAWER_WIDTH, DRAWER_ADD_HIT_WIDTH, DRAWER_HEADER_HEIGHT,
+    DRAWER_RESIZE_HIT_HALF_WIDTH, DRAWER_ROW_HEIGHT, DRAWER_ROW_STRIDE, DRAWER_ROW_TOP,
+    MAX_DRAWER_WIDTH, MIN_DRAWER_WIDTH,
+};
 use core::fmt::Debug;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use rio_backend::clipboard::Clipboard;
@@ -2625,25 +2629,32 @@ impl Screen<'_> {
         let x = self.mouse.x as f32 / scale;
         let y = self.mouse.y as f32 / scale;
         let width = self.context_manager.drawer_width();
-        if x > width {
+        if x > width + DRAWER_RESIZE_HIT_HALF_WIDTH {
             return false;
         }
 
         self.workspace_consumed = true;
 
-        if x >= width - 10.0 {
+        if x >= width - DRAWER_RESIZE_HIT_HALF_WIDTH {
             self.workspace_dragging = true;
             return true;
         }
 
-        if y < 48.0 {
-            if x >= width - 52.0 {
+        if y < DRAWER_HEADER_HEIGHT {
+            if x >= width - DRAWER_ADD_HIT_WIDTH {
                 self.create_workspace(clipboard);
             }
             return true;
         }
 
-        let row = ((y - 51.0) / 48.0).floor() as usize;
+        if y < DRAWER_ROW_TOP {
+            return true;
+        }
+        let row_offset = y - DRAWER_ROW_TOP;
+        let row = (row_offset / DRAWER_ROW_STRIDE).floor() as usize;
+        if row_offset % DRAWER_ROW_STRIDE > DRAWER_ROW_HEIGHT {
+            return true;
+        }
         if row < self.context_manager.workspace_count() {
             let old_index = self.context_manager.current_index();
             if let Some(new_index) = self.context_manager.select_workspace(row) {
@@ -2692,6 +2703,32 @@ impl Screen<'_> {
 
     pub fn workspace_resize_active(&self) -> bool {
         self.workspace_dragging
+    }
+
+    pub fn workspace_cursor_icon(&self) -> Option<CursorIcon> {
+        let scale = self.sugarloaf.scale_factor();
+        let x = self.mouse.x as f32 / scale;
+        let y = self.mouse.y as f32 / scale;
+        let width = self.context_manager.drawer_width();
+        if x > width + DRAWER_RESIZE_HIT_HALF_WIDTH {
+            return None;
+        }
+        if x >= width - DRAWER_RESIZE_HIT_HALF_WIDTH {
+            return Some(CursorIcon::ColResize);
+        }
+        if y < DRAWER_HEADER_HEIGHT && x >= width - DRAWER_ADD_HIT_WIDTH {
+            return Some(CursorIcon::Pointer);
+        }
+        if y >= DRAWER_ROW_TOP {
+            let row_offset = y - DRAWER_ROW_TOP;
+            let row = (row_offset / DRAWER_ROW_STRIDE).floor() as usize;
+            if row < self.context_manager.workspace_count()
+                && row_offset % DRAWER_ROW_STRIDE <= DRAWER_ROW_HEIGHT
+            {
+                return Some(CursorIcon::Pointer);
+            }
+        }
+        Some(CursorIcon::Default)
     }
 
     pub fn finish_workspace_drag(&mut self) -> bool {
@@ -2976,6 +3013,7 @@ impl Screen<'_> {
             self.sugarloaf.scale_factor(),
             num_tabs,
             max_tab_width,
+            self.context_manager.drawer_width(),
         )
     }
 

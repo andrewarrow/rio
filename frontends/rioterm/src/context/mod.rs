@@ -8,7 +8,10 @@ use crate::event::{Msg, RioEvent};
 pub use crate::layout::{ContextDimension, ContextGrid, ContextGridItem};
 use crate::messenger::Messenger;
 use crate::performer::{self, Machine};
-use crate::workspace::{PersistedTab, WorkspaceManager};
+use crate::workspace::{
+    tab_title_for_directory, workspace_title_for_directory, PersistedTab,
+    WorkspaceManager,
+};
 use renderable::Cursor;
 use renderable::RenderableContent;
 use rio_backend::config::layout::Margin;
@@ -882,10 +885,18 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
     }
 
     #[inline]
-    pub fn workspace_name(&self, index: usize) -> Option<&str> {
-        self.workspaces
-            .get(index)
-            .map(|workspace| workspace.name.as_str())
+    pub fn workspace_name(&self, index: usize) -> Option<String> {
+        let workspace = self.workspaces.get(index)?;
+        let directory = workspace
+            .tabs
+            .first()
+            .and_then(|&tab| self.current_directory_for_tab(tab));
+        Some(match directory {
+            Some(directory) => {
+                workspace_title_for_directory(&directory, dirs::home_dir().as_deref())
+            }
+            None => workspace.name.clone(),
+        })
     }
 
     #[inline]
@@ -1140,7 +1151,11 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         let template = self.config.title.content.clone();
         let context = self.contexts[tab_index].current_mut();
         context.title_dirty = false;
-        Self::refresh_item_title(&template, context, raw_title)
+        let title_changed = Self::refresh_item_title(&template, context, raw_title);
+        // A directory change also changes the pwd-derived tab and workspace
+        // labels, even when the configured window-title template does not use
+        // a path variable.
+        title_changed || raw_title.is_none()
     }
 
     /// Mark every pane's title stale. For changes that affect panes no
@@ -1184,12 +1199,15 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
     }
 
     /// The title the strip displays for `index`'s tab: the user rename,
-    /// else the rendered content, else the foreground program, else
-    /// "~". The native titlebar reads the same chain, so the two can
-    /// never disagree.
+    /// else the last component of its OSC 7 directory, else the rendered
+    /// content, foreground program, or "~". The native titlebar reads the
+    /// same chain, so the two can never disagree.
     pub fn displayed_title_for_tab(&self, index: usize) -> String {
         if let Some(custom) = self.custom_title(index) {
             return custom.to_string();
+        }
+        if let Some(directory) = self.current_directory_for_tab(index) {
+            return tab_title_for_directory(&directory);
         }
         if let Some(grid) = self.contexts.get(index) {
             let context = grid.current();
@@ -1201,6 +1219,12 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             }
         }
         String::from("~")
+    }
+
+    fn current_directory_for_tab(&self, index: usize) -> Option<std::path::PathBuf> {
+        self.contexts
+            .get(index)
+            .and_then(|grid| grid.current().terminal.lock().current_directory.clone())
     }
 
     #[inline]
@@ -1966,6 +1990,18 @@ pub mod test {
 
         // Unknown routes (already-closed panes) are a no-op.
         assert!(!cm.on_title_change(usize::MAX, Some("x")));
+    }
+
+    #[test]
+    fn pwd_titles_tabs_and_workspaces_like_simple_cmux() {
+        let cm =
+            ContextManager::start_with_capacity(5, VoidListener {}, WindowId::from(0))
+                .unwrap();
+        let directory = dirs::home_dir().unwrap().join("projects").join("rio");
+        cm.contexts[0].current().terminal.lock().current_directory = Some(directory);
+
+        assert_eq!(cm.displayed_title_for_tab(0), "rio");
+        assert_eq!(cm.workspace_name(0).as_deref(), Some("projects"));
     }
 
     fn set_tab_title(cm: &mut ContextManager<VoidListener>, index: usize, content: &str) {
