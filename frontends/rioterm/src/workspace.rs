@@ -422,7 +422,7 @@ mod tests {
         standardized_path, tab_title_for_directory, workspace_title_for_directory,
         WorkspaceManager,
     };
-    use std::path::Path;
+    use std::path::{Path, MAIN_SEPARATOR_STR};
 
     #[test]
     fn tab_titles_use_the_last_pwd_component() {
@@ -430,7 +430,10 @@ mod tests {
             tab_title_for_directory(Path::new("/Users/aa/os/rio")),
             "rio"
         );
-        assert_eq!(tab_title_for_directory(Path::new("/")), "/");
+        assert_eq!(
+            tab_title_for_directory(Path::new(MAIN_SEPARATOR_STR)),
+            MAIN_SEPARATOR_STR
+        );
         assert_eq!(
             tab_title_for_directory(Path::new("/Users/aa/os/../rio")),
             "rio"
