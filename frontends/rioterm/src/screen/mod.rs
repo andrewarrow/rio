@@ -1536,8 +1536,15 @@ impl Screen<'_> {
                         self.mark_dirty();
                     }
                     Act::SelectTab(tab_index) => {
+                        let Some(&tab_index) = self
+                            .context_manager
+                            .active_workspace_tab_indices()
+                            .get(*tab_index)
+                        else {
+                            return false;
+                        };
                         let old_index = self.context_manager.current_index();
-                        self.context_manager.select_tab(*tab_index);
+                        self.context_manager.select_tab(tab_index);
                         let new_index = self.context_manager.current_index();
                         self.context_manager.switch_context_visibility(
                             &mut self.sugarloaf,
@@ -1563,7 +1570,7 @@ impl Screen<'_> {
                         self.cancel_search(clipboard);
                         self.clear_selection();
                         let old_index = self.context_manager.current_index();
-                        self.context_manager.switch_to_next();
+                        self.context_manager.switch_to_next_workspace_tab();
                         let new_index = self.context_manager.current_index();
                         self.context_manager.switch_context_visibility(
                             &mut self.sugarloaf,
@@ -1575,8 +1582,19 @@ impl Screen<'_> {
                     Act::MoveCurrentTabToPrev => {
                         self.cancel_search(clipboard);
                         self.clear_selection();
+                        let workspace_tabs =
+                            self.context_manager.active_workspace_tab_indices().to_vec();
                         let old_index = self.context_manager.current_index();
-                        self.context_manager.move_current_to_prev();
+                        if let Some(position) =
+                            workspace_tabs.iter().position(|&tab| tab == old_index)
+                        {
+                            if workspace_tabs.len() > 1 {
+                                let target =
+                                    workspace_tabs[(position + workspace_tabs.len() - 1)
+                                        % workspace_tabs.len()];
+                                self.context_manager.swap_current_tab_with(target);
+                            }
+                        }
                         let new_index = self.context_manager.current_index();
                         self.context_manager.switch_context_visibility(
                             &mut self.sugarloaf,
@@ -1584,17 +1602,32 @@ impl Screen<'_> {
                             new_index,
                         );
                         let tab_width =
-                            self.island_tab_layout(self.context_manager.len()).tab_width;
+                            self.island_tab_layout(workspace_tabs.len()).tab_width;
                         if let Some(ref mut island) = self.renderer.island {
-                            island.remap_tab_swap(old_index, new_index, tab_width);
+                            island.remap_tab_swap(
+                                &workspace_tabs,
+                                old_index,
+                                new_index,
+                                tab_width,
+                            );
                         }
                         self.mark_dirty();
                     }
                     Act::MoveCurrentTabToNext => {
                         self.cancel_search(clipboard);
                         self.clear_selection();
+                        let workspace_tabs =
+                            self.context_manager.active_workspace_tab_indices().to_vec();
                         let old_index = self.context_manager.current_index();
-                        self.context_manager.move_current_to_next();
+                        if let Some(position) =
+                            workspace_tabs.iter().position(|&tab| tab == old_index)
+                        {
+                            if workspace_tabs.len() > 1 {
+                                let target =
+                                    workspace_tabs[(position + 1) % workspace_tabs.len()];
+                                self.context_manager.swap_current_tab_with(target);
+                            }
+                        }
                         let new_index = self.context_manager.current_index();
                         self.context_manager.switch_context_visibility(
                             &mut self.sugarloaf,
@@ -1602,9 +1635,14 @@ impl Screen<'_> {
                             new_index,
                         );
                         let tab_width =
-                            self.island_tab_layout(self.context_manager.len()).tab_width;
+                            self.island_tab_layout(workspace_tabs.len()).tab_width;
                         if let Some(ref mut island) = self.renderer.island {
-                            island.remap_tab_swap(old_index, new_index, tab_width);
+                            island.remap_tab_swap(
+                                &workspace_tabs,
+                                old_index,
+                                new_index,
+                                tab_width,
+                            );
                         }
                         self.mark_dirty();
                     }
@@ -1612,7 +1650,7 @@ impl Screen<'_> {
                         self.cancel_search(clipboard);
                         self.clear_selection();
                         let old_index = self.context_manager.current_index();
-                        self.context_manager.switch_to_prev();
+                        self.context_manager.switch_to_prev_workspace_tab();
                         let new_index = self.context_manager.current_index();
                         self.context_manager.switch_context_visibility(
                             &mut self.sugarloaf,
@@ -2997,15 +3035,20 @@ impl Screen<'_> {
     }
 
     pub fn update_close_button_hover(&mut self, mouse_x: f64, mouse_y: f64) -> bool {
-        let num_tabs = self.context_manager.len();
+        let tab_indices = self.context_manager.active_workspace_tab_indices();
+        let num_tabs = tab_indices.len();
         let scale_factor = self.sugarloaf.scale_factor();
+        let current_slot = tab_indices
+            .iter()
+            .position(|&tab| tab == self.context_manager.current_index())
+            .unwrap_or(0);
 
         let hovering = num_tabs > 1
             && self.renderer.navigation.island_visible(num_tabs)
             && mouse_y <= (ISLAND_HEIGHT * scale_factor) as f64
             && island::close_button_hit(
                 &self.island_tab_layout(num_tabs),
-                self.context_manager.current_index(),
+                current_slot,
                 mouse_x as f32 / scale_factor,
             );
 
@@ -3036,7 +3079,8 @@ impl Screen<'_> {
         let island_height_px = (ISLAND_HEIGHT * scale_factor) as f64;
 
         let window_width = self.sugarloaf.window_size().width;
-        let num_tabs = self.context_manager.len();
+        let tab_indices = self.context_manager.active_workspace_tab_indices().to_vec();
+        let num_tabs = tab_indices.len();
         let island_visible = self.renderer.navigation.island_visible(num_tabs);
 
         if let Some(ref mut island) = self.renderer.island {
@@ -3046,7 +3090,7 @@ impl Screen<'_> {
                     mouse_y as f32,
                     scale_factor,
                     window_width,
-                    num_tabs,
+                    &tab_indices,
                     &mut self.context_manager,
                 );
                 if consumed {
@@ -3106,7 +3150,10 @@ impl Screen<'_> {
             && self.is_close_press_tail(mouse_x_unscaled)
             && !island::close_button_hit(
                 &layout,
-                self.context_manager.current_index(),
+                tab_indices
+                    .iter()
+                    .position(|&tab| tab == self.context_manager.current_index())
+                    .unwrap_or(0),
                 mouse_x_unscaled,
             )
         {
@@ -3127,7 +3174,8 @@ impl Screen<'_> {
 
         // `.min` guards the float edge where x_in_tabs / tab_width
         // lands exactly on num_tabs despite x_in_tabs < tabs_width.
-        let clicked_tab = ((x_in_tabs / layout.tab_width) as usize).min(num_tabs - 1);
+        let clicked_slot = ((x_in_tabs / layout.tab_width) as usize).min(num_tabs - 1);
+        let clicked_tab = tab_indices[clicked_slot];
 
         #[cfg(target_os = "macos")]
         if !is_right_click && self.modifiers.state().super_key() {
@@ -3158,7 +3206,7 @@ impl Screen<'_> {
         }
 
         if clicked_tab == self.context_manager.current_index()
-            && island::close_button_hit(&layout, clicked_tab, mouse_x_unscaled)
+            && island::close_button_hit(&layout, clicked_slot, mouse_x_unscaled)
         {
             self.stop_hint_mode_if_active();
             self.last_close_press = Some((std::time::Instant::now(), mouse_x_unscaled));
@@ -3195,7 +3243,8 @@ impl Screen<'_> {
         let can_reorder = true;
         if num_tabs > 1 && can_reorder {
             if let Some(ref mut island) = self.renderer.island {
-                let tab_left = layout.left_margin + clicked_tab as f32 * layout.tab_width;
+                let tab_left =
+                    layout.left_margin + clicked_slot as f32 * layout.tab_width;
                 island.start_drag(
                     clicked_tab,
                     mouse_x_unscaled - tab_left,
@@ -3208,7 +3257,8 @@ impl Screen<'_> {
     }
 
     pub fn handle_tab_drag_move(&mut self, x_unscaled: f32) {
-        let num_tabs = self.context_manager.len();
+        let tab_indices = self.context_manager.active_workspace_tab_indices().to_vec();
+        let num_tabs = tab_indices.len();
 
         // A tab closed mid-drag invalidates the armed indices.
         if num_tabs < 2 {
@@ -3243,8 +3293,9 @@ impl Screen<'_> {
             return;
         }
 
-        let target = (((center - layout.left_margin) / layout.tab_width) as usize)
+        let target_slot = (((center - layout.left_margin) / layout.tab_width) as usize)
             .min(num_tabs - 1);
+        let target = tab_indices[target_slot];
         if target != old_index {
             self.context_manager.move_current_tab_to(target);
             let new_index = self.context_manager.current_index();
@@ -3254,14 +3305,19 @@ impl Screen<'_> {
                 new_index,
             );
             if let Some(ref mut island) = self.renderer.island {
-                island.remap_tab_move(old_index, new_index, layout.tab_width);
+                island.remap_tab_move(
+                    &tab_indices,
+                    old_index,
+                    new_index,
+                    layout.tab_width,
+                );
             }
         }
         self.mark_dirty();
     }
 
     pub fn handle_tab_drag_release(&mut self) -> bool {
-        let num_tabs = self.context_manager.len();
+        let num_tabs = self.context_manager.active_workspace_tab_indices().len();
         let layout = self.island_tab_layout(num_tabs);
 
         if let Some(ref mut island) = self.renderer.island {

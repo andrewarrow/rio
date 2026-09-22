@@ -563,25 +563,43 @@ impl Island {
         }
     }
 
+    #[inline]
+    fn remap_global_index(i: usize, from: usize, to: usize) -> usize {
+        Self::remap_index(i, from, to)
+    }
+
     /// Re-key all per-tab-index state after the tab at `from` moved to
     /// `to` (rotate semantics, matching
     /// `ContextManager::move_current_tab_to`), then seed slide springs
     /// on the displaced tabs so they animate into their new slot.
-    pub fn remap_tab_move(&mut self, from: usize, to: usize, tab_width: f32) {
+    pub fn remap_tab_move(
+        &mut self,
+        visible_tabs: &[usize],
+        from: usize,
+        to: usize,
+        tab_width: f32,
+    ) {
         if from == to {
             return;
         }
 
+        let Some(from_slot) = visible_tabs.iter().position(|&tab| tab == from) else {
+            return;
+        };
+        let Some(to_slot) = visible_tabs.iter().position(|&tab| tab == to) else {
+            return;
+        };
+
         self.slide_springs = self
             .slide_springs
             .drain()
-            .map(|(i, v)| (Self::remap_index(i, from, to), v))
+            .map(|(i, v)| (Self::remap_global_index(i, from, to), v))
             .collect();
         if let Some(picker) = self.color_picker_tab {
-            self.color_picker_tab = Some(Self::remap_index(picker, from, to));
+            self.color_picker_tab = Some(Self::remap_global_index(picker, from, to));
         }
         if let Some(ref mut drag) = self.drag {
-            drag.tab_index = Self::remap_index(drag.tab_index, from, to);
+            drag.tab_index = Self::remap_global_index(drag.tab_index, from, to);
         }
 
         // Displaced tabs shifted one slot away from `from` toward `to`'s
@@ -590,15 +608,24 @@ impl Island {
         // at `to`, which both ranges exclude — while dragging it floats,
         // and on a keyboard move it jumps (no old position to animate
         // from that wouldn't fight the selection change).
-        let (range, delta) = if from < to {
+        let (range, delta) = if from_slot < to_slot {
             // Tabs at from+1..=to moved left by one: now at from..to.
-            (from..to, tab_width)
+            (from_slot..to_slot, tab_width)
         } else {
             // Tabs at to..from moved right by one: now at to+1..=from.
-            (to + 1..from + 1, -tab_width)
+            (to_slot + 1..from_slot + 1, -tab_width)
         };
-        for i in range {
-            let spring = self.slide_springs.entry(i).or_insert_with(Spring::new);
+        for slot in range {
+            let old_global = if from_slot < to_slot {
+                visible_tabs[slot + 1]
+            } else {
+                visible_tabs[slot - 1]
+            };
+            let new_global = Self::remap_global_index(old_global, from, to);
+            let spring = self
+                .slide_springs
+                .entry(new_global)
+                .or_insert_with(Spring::new);
             spring.position += delta;
         }
     }
@@ -608,10 +635,23 @@ impl Island {
     /// (including the wrap-around end-to-end case) instead of rotating.
     /// Adjacent swaps get slide springs; wrap-around jumps don't (a
     /// full-bar slide reads as glitch, not motion).
-    pub fn remap_tab_swap(&mut self, a: usize, b: usize, tab_width: f32) {
+    pub fn remap_tab_swap(
+        &mut self,
+        visible_tabs: &[usize],
+        a: usize,
+        b: usize,
+        tab_width: f32,
+    ) {
         if a == b {
             return;
         }
+
+        let Some(a_slot) = visible_tabs.iter().position(|&tab| tab == a) else {
+            return;
+        };
+        let Some(b_slot) = visible_tabs.iter().position(|&tab| tab == b) else {
+            return;
+        };
 
         let swap_key = |i: usize| {
             if i == a {
@@ -631,8 +671,8 @@ impl Island {
             self.color_picker_tab = Some(swap_key(picker));
         }
 
-        if a.abs_diff(b) == 1 {
-            let delta = (b as f32 - a as f32) * tab_width;
+        if a_slot.abs_diff(b_slot) == 1 {
+            let delta = (b_slot as f32 - a_slot as f32) * tab_width;
             let spring = self.slide_springs.entry(a).or_insert_with(Spring::new);
             spring.position += delta;
             let spring = self.slide_springs.entry(b).or_insert_with(Spring::new);
@@ -745,10 +785,11 @@ impl Island {
         sugarloaf: &mut Sugarloaf,
         dimensions: (f32, f32, f32),
         context_manager: &ContextManager<EventProxy>,
+        tab_indices: &[usize],
         bg_color: [f32; 4],
     ) {
         let (window_width, _window_height, scale_factor) = dimensions;
-        let num_tabs = context_manager.len();
+        let num_tabs = tab_indices.len();
         let current_tab_index = context_manager.current_index();
 
         // Immediate-mode: no cached ids to hide. If we early-return
@@ -818,7 +859,7 @@ impl Island {
         let fills = island_fills(bg_color);
 
         // Render each tab
-        for tab_index in 0..num_tabs {
+        for &tab_index in tab_indices {
             // The dragged tab floats — drawn after the loop instead.
             if Some(tab_index) == drag_index {
                 x_position += tab_width;
@@ -1067,8 +1108,10 @@ impl Island {
 
         // Render color picker if open
         if let Some(picker_tab) = self.color_picker_tab {
-            if picker_tab < num_tabs {
-                let picker_tab_x = left_margin + picker_tab as f32 * tab_width;
+            if let Some(picker_slot) =
+                tab_indices.iter().position(|&tab| tab == picker_tab)
+            {
+                let picker_tab_x = left_margin + picker_slot as f32 * tab_width;
                 let selected = context_manager.custom_color(picker_tab);
                 self.render_color_picker(sugarloaf, picker_tab_x, tab_width, selected);
             }
@@ -1188,7 +1231,7 @@ impl Island {
         mouse_y: f32,
         scale_factor: f32,
         window_width: f32,
-        num_tabs: usize,
+        tab_indices: &[usize],
         context_manager: &mut ContextManager<EventProxy>,
     ) -> bool {
         let picker_tab = match self.color_picker_tab {
@@ -1204,8 +1247,19 @@ impl Island {
             left_margin,
             tab_width,
             ..
-        } = tab_strip_layout(window_width, scale_factor, num_tabs, self.max_tab_width);
-        let tab_x = left_margin + picker_tab as f32 * tab_width;
+        } = tab_strip_layout(
+            window_width,
+            scale_factor,
+            tab_indices.len(),
+            self.max_tab_width,
+        );
+        let Some(picker_slot) = tab_indices.iter().position(|&tab| tab == picker_tab)
+        else {
+            self.apply_rename(context_manager);
+            self.color_picker_tab = None;
+            return false;
+        };
+        let tab_x = left_margin + picker_slot as f32 * tab_width;
 
         // Picker is rendered just below the island
         let picker_y = ISLAND_HEIGHT;
@@ -1892,7 +1946,7 @@ mod tests {
         // and titles now live on the tab in ContextManager (see
         // context::test::test_custom_color_* / test_custom_title_*), so they
         // no longer need remapping here.
-        island.remap_tab_move(1, 3, 100.0);
+        island.remap_tab_move(&[0, 1, 2, 3], 1, 3, 100.0);
         assert_eq!(island.color_picker_tab, Some(2));
 
         // Displaced tabs (now at 1 and 2) got slide springs of +width.

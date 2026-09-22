@@ -347,11 +347,19 @@ impl Renderer {
             ..DrawOpts::default()
         };
 
+        // The macOS traffic lights occupy the upper-left corner of the
+        // unified titlebar. Keep the drawer heading clear of that chrome;
+        // workspace rows start below it and retain their normal inset.
+        #[cfg(target_os = "macos")]
+        let title_x = 76.0;
+        #[cfg(not(target_os = "macos"))]
+        let title_x = 16.0;
+
         sugarloaf.rect(None, 0.0, 0.0, width, height, panel, 0.0, 30);
         sugarloaf.line(width - 1.0, 0.0, width - 1.0, height, 1.0, 0.0, divider, 31);
         sugarloaf
             .text_mut()
-            .draw(16.0, 17.0, "Workspaces", &title_opts);
+            .draw(title_x, 17.0, "Workspaces", &title_opts);
         sugarloaf
             .text_mut()
             .draw(width - 30.0, 17.0, "+", &title_opts);
@@ -940,6 +948,7 @@ impl Renderer {
                 sugarloaf,
                 (window_size.width, window_size.height, scale_factor),
                 context_manager,
+                context_manager.active_workspace_tab_indices(),
                 island_bg,
             );
         }

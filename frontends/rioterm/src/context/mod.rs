@@ -676,7 +676,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             self.sync_current_route();
             return;
         }
-        self.switch_to_next();
+        self.switch_to_next_workspace_tab();
         // Make sure first split is selected - get the root key
         let current_tab = &mut self.contexts[self.current_index];
         if let Some(root) = current_tab.root {
@@ -691,7 +691,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             self.sync_current_route();
             return;
         }
-        self.switch_to_prev();
+        self.switch_to_prev_workspace_tab();
         // Make sure last split is selected - get the last key in order
         let current_tab = &mut self.contexts[self.current_index];
         let ordered_keys = current_tab.get_ordered_keys();
@@ -779,7 +779,13 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             return;
         }
 
-        self.set_current(self.contexts.len() - 1);
+        let Some(&last_tab) =
+            self.workspaces.tab_indices(self.workspaces.active()).last()
+        else {
+            return;
+        };
+        self.workspaces.select_tab(last_tab);
+        self.set_current(last_tab);
     }
 
     #[inline]
@@ -818,6 +824,11 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
     #[inline]
     pub fn workspace_tab_count(&self, index: usize) -> usize {
         self.workspaces.tab_count(index)
+    }
+
+    #[inline]
+    pub fn active_workspace_tab_indices(&self) -> &[usize] {
+        self.workspaces.tab_indices(self.workspaces.active())
     }
 
     #[inline]
@@ -1261,6 +1272,48 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         self.sync_current_route();
     }
 
+    /// Switch to another tab in the active workspace without exposing tabs
+    /// that belong to a different workspace.
+    #[inline]
+    pub fn switch_to_next_workspace_tab(&mut self) {
+        if self.config.is_native {
+            self.event_proxy
+                .send_event(RioEvent::SelectNativeTabNext, self.window_id);
+            return;
+        }
+
+        let tabs = self.workspaces.tab_indices(self.workspaces.active());
+        if tabs.len() <= 1 {
+            return;
+        }
+        let Some(current) = tabs.iter().position(|&tab| tab == self.current_index) else {
+            return;
+        };
+        let next = tabs[(current + 1) % tabs.len()];
+        self.workspaces.select_tab(next);
+        self.set_current(next);
+    }
+
+    #[inline]
+    pub fn switch_to_prev_workspace_tab(&mut self) {
+        if self.config.is_native {
+            self.event_proxy
+                .send_event(RioEvent::SelectNativeTabPrev, self.window_id);
+            return;
+        }
+
+        let tabs = self.workspaces.tab_indices(self.workspaces.active());
+        if tabs.len() <= 1 {
+            return;
+        }
+        let Some(current) = tabs.iter().position(|&tab| tab == self.current_index) else {
+            return;
+        };
+        let previous = tabs[(current + tabs.len() - 1) % tabs.len()];
+        self.workspaces.select_tab(previous);
+        self.set_current(previous);
+    }
+
     #[inline]
     pub fn move_current_to_prev(&mut self) {
         let len = self.contexts.len();
@@ -1270,9 +1323,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
 
         let current = self.current_index;
         let target_index = if current == 0 { len - 1 } else { current - 1 };
-        self.contexts.swap(current, target_index);
-        self.workspaces.swap_tabs(current, target_index);
-        self.select_tab(target_index);
+        self.swap_current_tab_with(target_index);
     }
 
     #[inline]
@@ -1284,6 +1335,15 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
 
         let current = self.current_index;
         let target_index = if current == len - 1 { 0 } else { current + 1 };
+        self.swap_current_tab_with(target_index);
+    }
+
+    #[inline]
+    pub fn swap_current_tab_with(&mut self, target_index: usize) {
+        let current = self.current_index;
+        if current == target_index || target_index >= self.contexts.len() {
+            return;
+        }
         self.contexts.swap(current, target_index);
         self.workspaces.swap_tabs(current, target_index);
         self.select_tab(target_index);
@@ -1303,6 +1363,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         let grid = self.contexts.remove(current);
         self.contexts.insert(target, grid);
         self.workspaces.move_tab(current, target);
+        self.workspaces.select_tab(target);
         self.set_current(target);
     }
 

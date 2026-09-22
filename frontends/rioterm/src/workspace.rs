@@ -156,6 +156,7 @@ impl WorkspaceManager {
                     *tab = first;
                 }
             }
+            workspace.tabs.sort_unstable();
         }
     }
 
@@ -166,6 +167,7 @@ impl WorkspaceManager {
             for tab in &mut workspace.tabs {
                 *tab = Self::remap_tab_index(*tab, from, to);
             }
+            workspace.tabs.sort_unstable();
         }
     }
 
@@ -222,13 +224,30 @@ mod tests {
     }
 
     #[test]
+    fn tabs_are_kept_in_their_workspace() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_tab(1);
+        let second = manager.create();
+        manager.add_tab(2);
+        manager.add_tab(3);
+
+        assert_eq!(manager.tab_indices(0), &[0, 1]);
+        assert_eq!(manager.tab_indices(second), &[2, 3]);
+
+        manager.set_active(0);
+        manager.add_tab(4);
+        assert_eq!(manager.tab_indices(0), &[0, 1, 4]);
+        assert_eq!(manager.tab_indices(second), &[2, 3]);
+    }
+
+    #[test]
     fn moving_a_tab_preserves_membership_and_selection() {
         let mut manager = WorkspaceManager::new();
         manager.add_tab(1);
         manager.add_tab(2);
         manager.select_tab(0);
         manager.move_tab(0, 2);
-        assert_eq!(manager.tab_indices(0), &[2, 0, 1]);
+        assert_eq!(manager.tab_indices(0), &[0, 1, 2]);
         assert_eq!(manager.select(0), Some(2));
     }
 }
