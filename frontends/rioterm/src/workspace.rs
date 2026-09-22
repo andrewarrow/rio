@@ -1,8 +1,14 @@
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+
 pub const DEFAULT_DRAWER_WIDTH: f32 = 220.0;
 pub const MIN_DRAWER_WIDTH: f32 = 160.0;
 pub const MAX_DRAWER_WIDTH: f32 = 420.0;
 
 const DEFAULT_WORKSPACE_NAME: &str = "Main";
+const PERSISTED_STATE_VERSION: u32 = 1;
+const MAX_RESTORED_TABS: usize = 28;
 
 #[derive(Debug, Clone)]
 pub struct Workspace {
@@ -18,6 +24,26 @@ pub struct WorkspaceManager {
     drawer_width: f32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PersistedWorkspaceState {
+    pub version: u32,
+    pub active_workspace: usize,
+    pub workspaces: Vec<PersistedWorkspace>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PersistedWorkspace {
+    pub name: String,
+    pub selected_tab: usize,
+    pub tabs: Vec<PersistedTab>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PersistedTab {
+    pub title: String,
+    pub current_directory: Option<String>,
+}
+
 impl WorkspaceManager {
     pub fn new() -> Self {
         Self {
@@ -29,6 +55,122 @@ impl WorkspaceManager {
             active: 0,
             drawer_width: DEFAULT_DRAWER_WIDTH,
         }
+    }
+
+    pub fn load() -> Option<(Self, Vec<PersistedTab>)> {
+        let data = fs::read(Self::state_path()).ok()?;
+        let state = serde_json::from_slice::<PersistedWorkspaceState>(&data).ok()?;
+        Self::from_persisted(state)
+    }
+
+    fn from_persisted(
+        state: PersistedWorkspaceState,
+    ) -> Option<(Self, Vec<PersistedTab>)> {
+        if state.version != PERSISTED_STATE_VERSION
+            || state.workspaces.is_empty()
+            || state
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.tabs.is_empty())
+        {
+            return None;
+        }
+
+        let tab_count: usize = state
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.tabs.len())
+            .sum();
+        if tab_count == 0 || tab_count > MAX_RESTORED_TABS {
+            return None;
+        }
+
+        let workspace_count = state.workspaces.len();
+        let active_workspace = state.active_workspace.min(workspace_count - 1);
+        let mut tabs = Vec::with_capacity(tab_count);
+        let mut workspaces = Vec::with_capacity(workspace_count);
+        for persisted in state.workspaces {
+            let first_tab = tabs.len();
+            let tab_len = persisted.tabs.len();
+            tabs.extend(persisted.tabs);
+            let selected_tab = first_tab + persisted.selected_tab.min(tab_len - 1);
+            workspaces.push(Workspace {
+                name: persisted.name,
+                tabs: (first_tab..first_tab + tab_len).collect(),
+                selected_tab,
+            });
+        }
+
+        Some((
+            Self {
+                workspaces,
+                active: active_workspace,
+                drawer_width: DEFAULT_DRAWER_WIDTH,
+            },
+            tabs,
+        ))
+    }
+
+    pub fn snapshot<F>(&self, mut tab: F) -> PersistedWorkspaceState
+    where
+        F: FnMut(usize) -> PersistedTab,
+    {
+        PersistedWorkspaceState {
+            version: PERSISTED_STATE_VERSION,
+            active_workspace: self.active,
+            workspaces: self
+                .workspaces
+                .iter()
+                .map(|workspace| PersistedWorkspace {
+                    name: workspace.name.clone(),
+                    selected_tab: workspace
+                        .tabs
+                        .iter()
+                        .position(|&tab_index| tab_index == workspace.selected_tab)
+                        .unwrap_or(0),
+                    tabs: workspace.tabs.iter().copied().map(&mut tab).collect(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn save_snapshot(state: &PersistedWorkspaceState) -> bool {
+        let data = match serde_json::to_vec(state) {
+            Ok(data) => data,
+            Err(error) => {
+                tracing::warn!("could not serialize workspace state: {error}");
+                return false;
+            }
+        };
+
+        let path = Self::state_path();
+        let Some(directory) = path.parent() else {
+            return false;
+        };
+        if let Err(error) = fs::create_dir_all(directory) {
+            tracing::warn!("could not create workspace state directory: {error}");
+            return false;
+        }
+
+        let temporary_path = path.with_extension("json.tmp");
+        if let Err(error) = fs::write(&temporary_path, data) {
+            tracing::warn!("could not write workspace state: {error}");
+            return false;
+        }
+        if let Err(error) = fs::rename(&temporary_path, &path) {
+            tracing::warn!("could not replace workspace state: {error}");
+            let _ = fs::remove_file(temporary_path);
+            return false;
+        }
+        true
+    }
+
+    fn state_path() -> PathBuf {
+        dirs::data_local_dir()
+            .or_else(dirs::data_dir)
+            .unwrap_or_else(|| Path::new(".").to_path_buf())
+            .join("rio")
+            .join("workspaces.json")
     }
 
     #[inline]
@@ -44,6 +186,12 @@ impl WorkspaceManager {
     #[inline]
     pub fn active(&self) -> usize {
         self.active
+    }
+
+    pub fn selected_tab_for_active(&self) -> Option<usize> {
+        self.workspaces
+            .get(self.active)
+            .map(|workspace| workspace.selected_tab)
     }
 
     #[inline]

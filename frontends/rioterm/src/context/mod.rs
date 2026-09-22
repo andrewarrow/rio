@@ -8,7 +8,7 @@ use crate::event::{Msg, RioEvent};
 pub use crate::layout::{ContextDimension, ContextGrid, ContextGridItem};
 use crate::messenger::Messenger;
 use crate::performer::{self, Machine};
-use crate::workspace::WorkspaceManager;
+use crate::workspace::{PersistedTab, WorkspaceManager};
 use renderable::Cursor;
 use renderable::RenderableContent;
 use rio_backend::config::layout::Margin;
@@ -22,16 +22,21 @@ use rio_backend::event::WindowId;
 use rio_backend::selection::SelectionRange;
 use rio_backend::sugarloaf::{font::SugarloafFont, Rect, Sugarloaf, SugarloafErrors};
 use std::error::Error;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // Global atomic counter for generating unique route IDs
 static ROUTE_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 // Global atomic counter for generating unique rich text IDs
 static RICH_TEXT_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+// The on-disk snapshot represents the app's primary workspace set. Only the
+// first terminal route owns it; additional windows keep their independent,
+// in-memory workspace state instead of overwriting the same file.
+static WORKSPACE_PERSISTENCE_OWNER: AtomicBool = AtomicBool::new(false);
 
 /// Generate a unique rich text ID for terminal contexts
 pub fn next_rich_text_id() -> usize {
@@ -144,6 +149,9 @@ pub struct ContextManager<T: EventListener> {
     pub config: ContextManagerConfig,
     pub workspaces: WorkspaceManager,
     base_scaled_margin: Margin,
+    persistence_enabled: bool,
+    last_saved_state: Option<Vec<u8>>,
+    persistence_ready_at: Option<Instant>,
 }
 
 /// Display name for the command a pane spawns: the configured program,
@@ -421,13 +429,34 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         scaled_margin: Margin,
         sugarloaf_errors: Option<SugarloafErrors>,
     ) -> Result<Self, Box<dyn Error>> {
+        let persistence_enabled = !ctx_config.is_native
+            && !cfg!(test)
+            && !WORKSPACE_PERSISTENCE_OWNER.swap(true, Ordering::SeqCst);
+        let restored = persistence_enabled.then(WorkspaceManager::load).flatten();
+        let mut initial_config = ctx_config.clone();
+        if let Some(directory) = restored
+            .as_ref()
+            .and_then(|(_, tabs)| tabs.first())
+            .and_then(|tab| tab.current_directory.as_deref())
+            .filter(|directory| std::path::Path::new(directory).is_dir())
+        {
+            initial_config.working_dir = Some(directory.to_string());
+            // The fork-based PTY inherits Rio's cwd. Use the spawn path for
+            // restored tabs so the persisted directory is applied before the
+            // shell starts (the default on Linux/BSD is otherwise fork).
+            #[cfg(not(target_os = "windows"))]
+            {
+                initial_config.use_fork = false;
+            }
+        }
+
         let initial_context = match ContextManager::create_context(
             cursor_state,
             event_proxy.clone(),
             window_id,
             rich_text_id,
             size,
-            &ctx_config,
+            &initial_config,
         ) {
             Ok(context) => context,
             Err(err_message) => {
@@ -482,9 +511,44 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             event_proxy,
             window_id,
             config: ctx_config,
-            workspaces: WorkspaceManager::new(),
+            workspaces: restored
+                .as_ref()
+                .map(|(workspaces, _)| workspaces.clone())
+                .unwrap_or_default(),
             base_scaled_margin: scaled_margin,
+            persistence_enabled,
+            last_saved_state: None,
+            persistence_ready_at: restored
+                .as_ref()
+                .map(|_| Instant::now() + Duration::from_secs(1)),
         };
+
+        if let Some((_, tabs)) = restored {
+            let mut restore_succeeded = true;
+            for tab in tabs.iter().skip(1) {
+                let directory = tab
+                    .current_directory
+                    .as_deref()
+                    .filter(|directory| std::path::Path::new(directory).is_dir())
+                    .map(str::to_string);
+                if !manager.add_restored_context(directory, next_rich_text_id()) {
+                    restore_succeeded = false;
+                    break;
+                }
+            }
+            if !restore_succeeded {
+                // A shell can fail to spawn independently of the saved
+                // layout. Keep the contexts that did start usable rather
+                // than leaving workspace indices pointing past the vector.
+                manager.workspaces = WorkspaceManager::new();
+                for tab_index in 1..manager.contexts.len() {
+                    manager.workspaces.add_tab(tab_index);
+                }
+            }
+            if let Some(selected_tab) = manager.workspaces.selected_tab_for_active() {
+                manager.set_current(selected_tab);
+            }
+        }
         // The native titlebar starts as the placeholder; one poke makes
         // it converge on the displayed title even for shells that never
         // emit an OSC title or OSC 7.
@@ -528,6 +592,9 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             config,
             workspaces: WorkspaceManager::new(),
             base_scaled_margin: Margin::default(),
+            persistence_enabled: false,
+            last_saved_state: None,
+            persistence_ready_at: None,
         })
     }
 
@@ -849,6 +916,62 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
     #[inline]
     pub fn select_workspace(&mut self, index: usize) -> Option<usize> {
         self.workspaces.select(index)
+    }
+
+    /// Persist the workspace layout and the last OSC 7 directory reported by
+    /// each tab. The serialized bytes are cached so the event loop can call
+    /// this after ordinary terminal events without rewriting an unchanged
+    /// snapshot.
+    pub fn save_workspace_state(&mut self) {
+        self.save_workspace_state_inner(false);
+    }
+
+    /// Save immediately during shutdown, even if restored shells have not yet
+    /// had time to report their initial OSC 7 directories.
+    pub fn save_workspace_state_now(&mut self) {
+        self.save_workspace_state_inner(true);
+    }
+
+    fn save_workspace_state_inner(&mut self, force: bool) {
+        if !self.persistence_enabled {
+            return;
+        }
+        if let Some(ready_at) = self.persistence_ready_at {
+            if !force && Instant::now() < ready_at {
+                return;
+            }
+            self.persistence_ready_at = None;
+        }
+
+        let tabs: Vec<PersistedTab> = (0..self.contexts.len())
+            .map(|index| {
+                let title = self.displayed_title_for_tab(index);
+                let context = self.contexts[index].current();
+                let terminal = context.terminal.lock();
+                PersistedTab {
+                    title,
+                    current_directory: terminal
+                        .current_directory
+                        .as_ref()
+                        .map(|directory| directory.to_string_lossy().into_owned()),
+                }
+            })
+            .collect();
+        let state = self.workspaces.snapshot(|tab_index| {
+            tabs.get(tab_index).cloned().unwrap_or(PersistedTab {
+                title: String::new(),
+                current_directory: None,
+            })
+        });
+        let Ok(data) = serde_json::to_vec(&state) else {
+            return;
+        };
+        if self.last_saved_state.as_deref() == Some(data.as_slice()) {
+            return;
+        }
+        if WorkspaceManager::save_snapshot(&state) {
+            self.last_saved_state = Some(data);
+        }
     }
 
     #[inline]
@@ -1518,10 +1641,27 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             }
         }
 
+        self.append_context(working_dir, redirect, rich_text_id, true, false);
+    }
+
+    fn add_restored_context(
+        &mut self,
+        working_dir: Option<String>,
+        rich_text_id: usize,
+    ) -> bool {
+        self.append_context(working_dir, false, rich_text_id, false, true)
+    }
+
+    fn append_context(
+        &mut self,
+        working_dir: Option<String>,
+        redirect: bool,
+        rich_text_id: usize,
+        add_to_workspace: bool,
+        force_spawn: bool,
+    ) -> bool {
         if self.config.is_native {
-            self.event_proxy
-                .send_event(RioEvent::CreateNativeTab(working_dir), self.window_id);
-            return;
+            return false;
         }
 
         let size = self.contexts.len();
@@ -1531,6 +1671,10 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             let mut cloned_config = self.config.clone();
             if working_dir.is_some() {
                 cloned_config.working_dir = working_dir;
+                #[cfg(not(target_os = "windows"))]
+                if force_spawn {
+                    cloned_config.use_fork = false;
+                }
             }
 
             let current = self.current();
@@ -1560,17 +1704,21 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
                         self.config.split_active_color,
                         self.config.panel,
                     ));
-                    self.workspaces.add_tab(last_index);
+                    if add_to_workspace {
+                        self.workspaces.add_tab(last_index);
+                    }
                     if redirect {
                         self.current_index = last_index;
                         self.sync_current_route();
                     }
+                    return true;
                 }
                 Err(..) => {
                     tracing::error!("not able to create a new context");
                 }
             }
         }
+        false
     }
 
     /// Hide all rich text components except for the current tab

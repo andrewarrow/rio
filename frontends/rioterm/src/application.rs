@@ -2364,6 +2364,10 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        for route in self.router.routes.values_mut() {
+            route.window.screen.context_manager.save_workspace_state();
+        }
+
         // A confirmed quit can be set from any input path (keys today,
         // a future mouse or menu handler tomorrow); honoring it here,
         // once per event batch, keeps the exit independent of which
@@ -2433,6 +2437,14 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
     // This is irreversible - if this event is emitted, it is guaranteed to be the last event that gets emitted.
     // You generally want to treat this as an “do on quit” event.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        for route in self.router.routes.values_mut() {
+            route
+                .window
+                .screen
+                .context_manager
+                .save_workspace_state_now();
+        }
+
         // Ensure that all the windows are dropped, so the destructors for
         // Renderer and contexts ran.
         self.router.routes.clear();
