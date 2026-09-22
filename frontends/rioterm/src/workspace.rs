@@ -1,0 +1,234 @@
+pub const DEFAULT_DRAWER_WIDTH: f32 = 220.0;
+pub const MIN_DRAWER_WIDTH: f32 = 160.0;
+pub const MAX_DRAWER_WIDTH: f32 = 420.0;
+
+const DEFAULT_WORKSPACE_NAME: &str = "Main";
+
+#[derive(Debug, Clone)]
+pub struct Workspace {
+    pub name: String,
+    pub tabs: Vec<usize>,
+    selected_tab: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceManager {
+    workspaces: Vec<Workspace>,
+    active: usize,
+    drawer_width: f32,
+}
+
+impl WorkspaceManager {
+    pub fn new() -> Self {
+        Self {
+            workspaces: vec![Workspace {
+                name: DEFAULT_WORKSPACE_NAME.to_string(),
+                tabs: vec![0],
+                selected_tab: 0,
+            }],
+            active: 0,
+            drawer_width: DEFAULT_DRAWER_WIDTH,
+        }
+    }
+
+    #[inline]
+    pub fn drawer_width(&self) -> f32 {
+        self.drawer_width
+    }
+
+    #[inline]
+    pub fn set_drawer_width(&mut self, width: f32) {
+        self.drawer_width = width.clamp(MIN_DRAWER_WIDTH, MAX_DRAWER_WIDTH);
+    }
+
+    #[inline]
+    pub fn active(&self) -> usize {
+        self.active
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.workspaces.len()
+    }
+
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<&Workspace> {
+        self.workspaces.get(index)
+    }
+
+    pub fn create(&mut self) -> usize {
+        let number = self.workspaces.len() + 1;
+        self.workspaces.push(Workspace {
+            name: format!("Workspace {number}"),
+            tabs: Vec::new(),
+            selected_tab: 0,
+        });
+        self.active = self.workspaces.len() - 1;
+        self.active
+    }
+
+    pub fn select(&mut self, index: usize) -> Option<usize> {
+        let workspace = self.workspaces.get(index)?;
+        let tab = workspace
+            .tabs
+            .iter()
+            .copied()
+            .find(|&tab| tab == workspace.selected_tab)
+            .or_else(|| workspace.tabs.first().copied())?;
+        self.active = index;
+        Some(tab)
+    }
+
+    pub fn workspace_for_tab(&self, tab_index: usize) -> Option<usize> {
+        self.workspaces
+            .iter()
+            .position(|workspace| workspace.tabs.contains(&tab_index))
+    }
+
+    pub fn set_active(&mut self, index: usize) {
+        if index < self.workspaces.len() {
+            self.active = index;
+        }
+    }
+
+    pub fn select_tab(&mut self, tab_index: usize) {
+        if let Some(workspace) = self
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.tabs.contains(&tab_index))
+        {
+            workspace.selected_tab = tab_index;
+        }
+    }
+
+    pub fn add_tab(&mut self, tab_index: usize) {
+        if let Some(workspace) = self.workspaces.get_mut(self.active) {
+            workspace.tabs.push(tab_index);
+            if workspace.tabs.len() == 1 {
+                workspace.selected_tab = tab_index;
+            }
+        }
+    }
+
+    pub fn remove_tab(&mut self, removed: usize) {
+        for workspace in &mut self.workspaces {
+            workspace.tabs.retain(|&tab| tab != removed);
+            for tab in &mut workspace.tabs {
+                if *tab > removed {
+                    *tab -= 1;
+                }
+            }
+            if workspace.selected_tab == removed {
+                workspace.selected_tab = workspace.tabs.first().copied().unwrap_or(0);
+            } else if workspace.selected_tab > removed {
+                workspace.selected_tab -= 1;
+            }
+        }
+
+        // A workspace is a useful container only while it has a tab. Keep
+        // the last workspace alive so Rio always has somewhere to create a
+        // new terminal.
+        if self.workspaces.len() > 1 {
+            self.workspaces
+                .retain(|workspace| !workspace.tabs.is_empty());
+        }
+        if self.workspaces.is_empty() {
+            self.workspaces.push(Workspace {
+                name: DEFAULT_WORKSPACE_NAME.to_string(),
+                tabs: Vec::new(),
+                selected_tab: 0,
+            });
+        }
+        self.active = self.active.min(self.workspaces.len() - 1);
+    }
+
+    pub fn swap_tabs(&mut self, first: usize, second: usize) {
+        for workspace in &mut self.workspaces {
+            if workspace.selected_tab == first {
+                workspace.selected_tab = second;
+            } else if workspace.selected_tab == second {
+                workspace.selected_tab = first;
+            }
+            for tab in &mut workspace.tabs {
+                if *tab == first {
+                    *tab = second;
+                } else if *tab == second {
+                    *tab = first;
+                }
+            }
+        }
+    }
+
+    pub fn move_tab(&mut self, from: usize, to: usize) {
+        for workspace in &mut self.workspaces {
+            workspace.selected_tab =
+                Self::remap_tab_index(workspace.selected_tab, from, to);
+            for tab in &mut workspace.tabs {
+                *tab = Self::remap_tab_index(*tab, from, to);
+            }
+        }
+    }
+
+    fn remap_tab_index(index: usize, from: usize, to: usize) -> usize {
+        if index == from {
+            to
+        } else if from < to && index > from && index <= to {
+            index - 1
+        } else if to < from && index >= to && index < from {
+            index + 1
+        } else {
+            index
+        }
+    }
+
+    pub fn tab_count(&self, index: usize) -> usize {
+        self.workspaces
+            .get(index)
+            .map_or(0, |workspace| workspace.tabs.len())
+    }
+
+    pub fn tab_indices(&self, index: usize) -> &[usize] {
+        self.workspaces
+            .get(index)
+            .map_or(&[], |workspace| workspace.tabs.as_slice())
+    }
+}
+
+impl Default for WorkspaceManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkspaceManager;
+
+    #[test]
+    fn removing_a_tab_keeps_workspace_indices_consistent() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_tab(1);
+        manager.remove_tab(0);
+        assert_eq!(manager.tab_indices(0), &[0]);
+    }
+
+    #[test]
+    fn new_workspaces_are_selected_and_can_receive_a_tab() {
+        let mut manager = WorkspaceManager::new();
+        let workspace = manager.create();
+        manager.add_tab(1);
+        assert_eq!(manager.active(), workspace);
+        assert_eq!(manager.tab_indices(workspace), &[1]);
+    }
+
+    #[test]
+    fn moving_a_tab_preserves_membership_and_selection() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_tab(1);
+        manager.add_tab(2);
+        manager.select_tab(0);
+        manager.move_tab(0, 2);
+        assert_eq!(manager.tab_indices(0), &[2, 0, 1]);
+        assert_eq!(manager.select(0), Some(2));
+    }
+}

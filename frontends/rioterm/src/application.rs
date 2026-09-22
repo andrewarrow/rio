@@ -1361,6 +1361,15 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                         let chrome_press = route.window.screen.take_chrome_press();
 
                         if let MouseButton::Left = button {
+                            if route
+                                .window
+                                .screen
+                                .handle_workspace_click(&mut self.router.clipboard)
+                            {
+                                route.request_redraw();
+                                return;
+                            }
+
                             // Check if clicking on a panel border to start resize
                             {
                                 let mx = route.window.screen.mouse.x as f32;
@@ -1531,6 +1540,13 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                             .process_mouse_bindings(button, &mut self.router.clipboard);
                     }
                     ElementState::Released => {
+                        if button == MouseButton::Left
+                            && route.window.screen.finish_workspace_drag()
+                        {
+                            route.request_redraw();
+                            return;
+                        }
+
                         // Stop selection auto-scroll on button release.
                         if let MouseButton::Left | MouseButton::Right = button {
                             let scroll_timer_id =
@@ -1684,6 +1700,22 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     return;
                 }
 
+                let scale_factor = route.window.screen.sugarloaf.scale_factor();
+                if route.window.screen.workspace_interaction_active() {
+                    route
+                        .window
+                        .screen
+                        .update_workspace_drawer_width(x as f32 / scale_factor);
+                    route.window.winit_window.set_cursor(
+                        if route.window.screen.workspace_resize_active() {
+                            CursorIcon::ColResize
+                        } else {
+                            CursorIcon::Default
+                        },
+                    );
+                    route.request_redraw();
+                    return;
+                }
                 // Handle assistant overlay hover
                 if route.window.screen.renderer.assistant.is_active() {
                     let scale = route.window.screen.sugarloaf.scale_factor();

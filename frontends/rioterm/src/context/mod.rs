@@ -8,6 +8,7 @@ use crate::event::{Msg, RioEvent};
 pub use crate::layout::{ContextDimension, ContextGrid, ContextGridItem};
 use crate::messenger::Messenger;
 use crate::performer::{self, Machine};
+use crate::workspace::WorkspaceManager;
 use renderable::Cursor;
 use renderable::RenderableContent;
 use rio_backend::config::layout::Margin;
@@ -141,6 +142,8 @@ pub struct ContextManager<T: EventListener> {
     event_proxy: T,
     window_id: WindowId,
     pub config: ContextManagerConfig,
+    pub workspaces: WorkspaceManager,
+    base_scaled_margin: Margin,
 }
 
 /// Display name for the command a pane spawns: the configured program,
@@ -479,6 +482,8 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             event_proxy,
             window_id,
             config: ctx_config,
+            workspaces: WorkspaceManager::new(),
+            base_scaled_margin: scaled_margin,
         };
         // The native titlebar starts as the placeholder; one poke makes
         // it converge on the displayed title even for shells that never
@@ -521,6 +526,8 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             event_proxy,
             window_id,
             config,
+            workspaces: WorkspaceManager::new(),
+            base_scaled_margin: Margin::default(),
         })
     }
 
@@ -555,6 +562,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         // A whole tab dies.
         self.contexts[tab_index].remove_from_sugarloaf(sugarloaf);
         self.contexts.remove(tab_index);
+        self.workspaces.remove_tab(tab_index);
 
         if self.contexts.is_empty() {
             return true;
@@ -569,6 +577,11 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             self.set_current(new_index);
         } else {
             self.current_index = new_index;
+        }
+
+        if let Some(workspace) = self.workspaces.workspace_for_tab(self.current_index) {
+            self.workspaces.set_active(workspace);
+            self.workspaces.select_tab(self.current_index);
         }
 
         self.keep_only_active_context_visible(sugarloaf);
@@ -716,6 +729,10 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             return;
         }
 
+        if let Some(workspace) = self.workspaces.workspace_for_tab(tab_index) {
+            self.workspaces.set_active(workspace);
+            self.workspaces.select_tab(tab_index);
+        }
         self.set_current(tab_index);
     }
 
@@ -779,6 +796,76 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
     #[inline]
     pub fn len(&self) -> usize {
         self.contexts.len()
+    }
+
+    #[inline]
+    pub fn workspace_count(&self) -> usize {
+        self.workspaces.len()
+    }
+
+    #[inline]
+    pub fn active_workspace(&self) -> usize {
+        self.workspaces.active()
+    }
+
+    #[inline]
+    pub fn workspace_name(&self, index: usize) -> Option<&str> {
+        self.workspaces
+            .get(index)
+            .map(|workspace| workspace.name.as_str())
+    }
+
+    #[inline]
+    pub fn workspace_tab_count(&self, index: usize) -> usize {
+        self.workspaces.tab_count(index)
+    }
+
+    #[inline]
+    pub fn workspace_has_bell(&self, index: usize) -> bool {
+        self.workspaces
+            .tab_indices(index)
+            .iter()
+            .any(|&tab| self.contexts.get(tab).is_some_and(|grid| grid.bell))
+    }
+
+    /// Create a workspace. Its first tab is created by the screen after
+    /// selecting it, so workspaces never appear without a terminal.
+    #[inline]
+    pub fn create_workspace(&mut self) -> usize {
+        self.workspaces.create()
+    }
+
+    #[inline]
+    pub fn select_workspace(&mut self, index: usize) -> Option<usize> {
+        self.workspaces.select(index)
+    }
+
+    #[inline]
+    pub fn drawer_width(&self) -> f32 {
+        self.workspaces.drawer_width()
+    }
+
+    pub fn set_drawer_width(&mut self, width: f32, scale: f32) {
+        self.workspaces.set_drawer_width(width);
+        let mut scaled_margin = self.base_scaled_margin;
+        scaled_margin.left += self.workspaces.drawer_width() * scale;
+        for grid in &mut self.contexts {
+            grid.update_scaled_margin(scaled_margin);
+        }
+    }
+
+    pub fn update_base_margin_scale(&mut self, new_scale: f32) {
+        let old_scale = self
+            .contexts
+            .first()
+            .map(|grid| grid.current().dimension.dimension.scale)
+            .unwrap_or(new_scale)
+            .max(1.0);
+        let ratio = new_scale / old_scale;
+        self.base_scaled_margin.top *= ratio;
+        self.base_scaled_margin.right *= ratio;
+        self.base_scaled_margin.bottom *= ratio;
+        self.base_scaled_margin.left *= ratio;
     }
 
     #[cfg(test)]
@@ -1106,9 +1193,15 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         // Remove all rich text from the grid before removing the context
         self.contexts[index_to_remove].remove_from_sugarloaf(sugarloaf);
         self.contexts.remove(index_to_remove);
+        self.workspaces.remove_tab(index_to_remove);
 
         if should_set_current {
             self.set_current(0);
+        }
+
+        if let Some(workspace) = self.workspaces.workspace_for_tab(self.current_index) {
+            self.workspaces.set_active(workspace);
+            self.workspaces.select_tab(self.current_index);
         }
 
         self.keep_only_active_context_visible(sugarloaf);
@@ -1178,6 +1271,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         let current = self.current_index;
         let target_index = if current == 0 { len - 1 } else { current - 1 };
         self.contexts.swap(current, target_index);
+        self.workspaces.swap_tabs(current, target_index);
         self.select_tab(target_index);
     }
 
@@ -1191,6 +1285,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         let current = self.current_index;
         let target_index = if current == len - 1 { 0 } else { current + 1 };
         self.contexts.swap(current, target_index);
+        self.workspaces.swap_tabs(current, target_index);
         self.select_tab(target_index);
     }
 
@@ -1207,6 +1302,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
 
         let grid = self.contexts.remove(current);
         self.contexts.insert(target, grid);
+        self.workspaces.move_tab(current, target);
         self.set_current(target);
     }
 
@@ -1403,6 +1499,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
                         self.config.split_active_color,
                         self.config.panel,
                     ));
+                    self.workspaces.add_tab(last_index);
                     if redirect {
                         self.current_index = last_index;
                         self.sync_current_route();

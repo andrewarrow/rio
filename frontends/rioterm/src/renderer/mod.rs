@@ -287,6 +287,126 @@ impl Renderer {
         }
     }
 
+    fn render_workspace_drawer(
+        &self,
+        sugarloaf: &mut Sugarloaf,
+        context_manager: &ContextManager<EventProxy>,
+    ) {
+        let width = context_manager.drawer_width();
+        let height = sugarloaf.window_size().height / sugarloaf.scale_factor();
+        let background = self
+            .last_window_bg
+            .map(|color| {
+                [
+                    color.r as f32,
+                    color.g as f32,
+                    color.b as f32,
+                    color.a as f32,
+                ]
+            })
+            .unwrap_or(self.named_colors.background.0);
+        let panel = [
+            (background[0] * 0.92).min(1.0),
+            (background[1] * 0.92).min(1.0),
+            (background[2] * 0.92).min(1.0),
+            1.0,
+        ];
+        let selected = [
+            self.named_colors.tabs_active[0],
+            self.named_colors.tabs_active[1],
+            self.named_colors.tabs_active[2],
+            0.28,
+        ];
+        let divider = [
+            self.named_colors.foreground[0],
+            self.named_colors.foreground[1],
+            self.named_colors.foreground[2],
+            0.16,
+        ];
+        let foreground = [
+            (self.named_colors.foreground[0] * 255.0) as u8,
+            (self.named_colors.foreground[1] * 255.0) as u8,
+            (self.named_colors.foreground[2] * 255.0) as u8,
+            255,
+        ];
+        let muted = [foreground[0], foreground[1], foreground[2], 170];
+        let title_opts = DrawOpts {
+            font_size: 14.0,
+            color: foreground,
+            bold: true,
+            ..DrawOpts::default()
+        };
+        let row_opts = DrawOpts {
+            font_size: 13.0,
+            color: foreground,
+            ..DrawOpts::default()
+        };
+        let muted_opts = DrawOpts {
+            font_size: 11.0,
+            color: muted,
+            ..DrawOpts::default()
+        };
+
+        sugarloaf.rect(None, 0.0, 0.0, width, height, panel, 0.0, 30);
+        sugarloaf.line(width - 1.0, 0.0, width - 1.0, height, 1.0, 0.0, divider, 31);
+        sugarloaf
+            .text_mut()
+            .draw(16.0, 17.0, "Workspaces", &title_opts);
+        sugarloaf
+            .text_mut()
+            .draw(width - 30.0, 17.0, "+", &title_opts);
+
+        for index in 0..context_manager.workspace_count() {
+            let y = 51.0 + index as f32 * 48.0;
+            let active = index == context_manager.active_workspace();
+            if active {
+                sugarloaf.rounded_rect(
+                    None,
+                    8.0,
+                    y,
+                    width - 16.0,
+                    42.0,
+                    selected,
+                    0.0,
+                    6.0,
+                    32,
+                );
+            }
+
+            let name = context_manager.workspace_name(index).unwrap_or("Workspace");
+            let tab_count = context_manager.workspace_tab_count(index);
+            let label = format!(
+                "{}{}",
+                if context_manager.workspace_has_bell(index) {
+                    "• "
+                } else {
+                    ""
+                },
+                name
+            );
+            sugarloaf.text_mut().draw(18.0, y + 8.0, &label, &row_opts);
+            let count = format!(
+                "{tab_count} {}",
+                if tab_count == 1 { "tab" } else { "tabs" }
+            );
+            sugarloaf
+                .text_mut()
+                .draw(18.0, y + 25.0, &count, &muted_opts);
+        }
+
+        // The handle remains a small, quiet hit target at the drawer edge.
+        sugarloaf.rect(
+            None,
+            width - 4.0,
+            0.0,
+            8.0,
+            height,
+            [0.0, 0.0, 0.0, 0.001],
+            0.0,
+            33,
+        );
+    }
+
     #[inline]
     pub fn use_drawable_chars(&self) -> bool {
         self.use_drawable_chars
@@ -823,6 +943,8 @@ impl Renderer {
                 island_bg,
             );
         }
+
+        self.render_workspace_drawer(sugarloaf, context_manager);
 
         self.assistant.render(
             sugarloaf,

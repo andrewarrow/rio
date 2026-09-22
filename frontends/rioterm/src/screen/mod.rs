@@ -30,6 +30,7 @@ use crate::renderer::island::{self, TabStripLayout, ISLAND_HEIGHT};
 use crate::renderer::{utils::padding_top_from_config, Renderer};
 use crate::screen::hint::HintMatches;
 use crate::selection::{Selection, SelectionType};
+use crate::workspace::{DEFAULT_DRAWER_WIDTH, MAX_DRAWER_WIDTH, MIN_DRAWER_WIDTH};
 use core::fmt::Debug;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use rio_backend::clipboard::Clipboard;
@@ -99,6 +100,8 @@ pub struct Screen<'screen> {
     /// still refreshes it. Reset on wheel scroll and highlight clears.
     last_hint_probe: Option<(Pos, rio_window::keyboard::ModifiersState)>,
     pub resize_state: Option<crate::layout::ResizeState>,
+    workspace_dragging: bool,
+    workspace_consumed: bool,
     #[cfg(target_os = "macos")]
     pub allow_manual_dragging: bool,
     last_chrome_press: Option<ChromePress>,
@@ -299,7 +302,7 @@ impl Screen<'_> {
             state: CursorState::new(config.cursor.shape.into()),
         };
 
-        let context_manager = context::ContextManager::start(
+        let mut context_manager = context::ContextManager::start(
             // config.cursor.blinking
             (&cursor, config.cursor.blinking),
             event_proxy,
@@ -311,6 +314,13 @@ impl Screen<'_> {
             scaled_margin,
             sugarloaf_errors,
         )?;
+
+        context_manager.set_drawer_width(DEFAULT_DRAWER_WIDTH, scale as f32);
+        context_manager.resize_all_grids(
+            size.width as f32,
+            size.height as f32,
+            &mut sugarloaf,
+        );
 
         sugarloaf.set_window_opaque(window_should_be_opaque(config));
         sugarloaf.set_background_color(Some(renderer.dynamic_background.1));
@@ -349,6 +359,8 @@ impl Screen<'_> {
             bindings,
             last_ime_cursor_pos: None,
             resize_state: None,
+            workspace_dragging: false,
+            workspace_consumed: false,
             #[cfg(target_os = "macos")]
             allow_manual_dragging: config.navigation.is_enabled(),
             last_chrome_press: None,
@@ -712,6 +724,7 @@ impl Screen<'_> {
     ) -> &mut Self {
         self.sugarloaf.rescale(new_scale);
         self.sugarloaf.resize(new_size.width, new_size.height);
+        self.context_manager.update_base_margin_scale(new_scale);
 
         for context_grid in self.context_manager.contexts_mut() {
             let old_scale = context_grid.current().dimension.dimension.scale.max(1.0);
@@ -1734,6 +1747,11 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
+    pub fn create_workspace(&mut self, clipboard: &mut Clipboard) {
+        self.context_manager.create_workspace();
+        self.create_tab(clipboard);
+    }
+
     pub fn close_split_or_tab(&mut self, clipboard: &mut Clipboard) {
         if self.context_manager.current_grid_len() > 1 {
             self.clear_selection();
@@ -2557,7 +2575,94 @@ impl Screen<'_> {
             .is_none()
     }
 
-    // return true if the click was handled by the island
+    /// Handle the workspace rail before terminal mouse handling. Selection
+    /// still flows through ContextManager so PTY visibility and focus remain
+    /// centralized.
+    pub fn handle_workspace_click(&mut self, clipboard: &mut Clipboard) -> bool {
+        if self.mouse.left_button_state != ElementState::Pressed {
+            return false;
+        }
+
+        let scale = self.sugarloaf.scale_factor();
+        let x = self.mouse.x as f32 / scale;
+        let y = self.mouse.y as f32 / scale;
+        let width = self.context_manager.drawer_width();
+        if x > width {
+            return false;
+        }
+
+        self.workspace_consumed = true;
+
+        if x >= width - 10.0 {
+            self.workspace_dragging = true;
+            return true;
+        }
+
+        if y < 48.0 {
+            if x >= width - 52.0 {
+                self.create_workspace(clipboard);
+            }
+            return true;
+        }
+
+        let row = ((y - 51.0) / 48.0).floor() as usize;
+        if row < self.context_manager.workspace_count() {
+            let old_index = self.context_manager.current_index();
+            if let Some(new_index) = self.context_manager.select_workspace(row) {
+                self.context_manager.set_current(new_index);
+                self.context_manager.switch_context_visibility(
+                    &mut self.sugarloaf,
+                    old_index,
+                    new_index,
+                );
+                self.stop_hint_mode_if_active();
+                self.cancel_search(clipboard);
+                self.clear_selection();
+                self.mark_dirty();
+            }
+        }
+        true
+    }
+
+    pub fn update_workspace_drawer_width(&mut self, x: f32) -> bool {
+        if !self.workspace_dragging {
+            return false;
+        }
+
+        let width = x.clamp(MIN_DRAWER_WIDTH, MAX_DRAWER_WIDTH);
+        let old_width = self.context_manager.drawer_width();
+        if (old_width - width).abs() < f32::EPSILON {
+            return true;
+        }
+
+        let scale = self.sugarloaf.scale_factor();
+        self.context_manager.set_drawer_width(width, scale);
+        let size = self.sugarloaf.window_size();
+        self.context_manager.resize_all_grids(
+            size.width,
+            size.height,
+            &mut self.sugarloaf,
+        );
+        self.refresh_titles();
+        self.mark_dirty();
+        true
+    }
+
+    pub fn workspace_interaction_active(&self) -> bool {
+        self.workspace_consumed
+    }
+
+    pub fn workspace_resize_active(&self) -> bool {
+        self.workspace_dragging
+    }
+
+    pub fn finish_workspace_drag(&mut self) -> bool {
+        let was_dragging = self.workspace_consumed;
+        self.workspace_dragging = false;
+        self.workspace_consumed = false;
+        was_dragging
+    }
+
     #[inline]
     pub fn handle_palette_click(&mut self, clipboard: &mut Clipboard) -> bool {
         if !self.renderer.command_palette.is_enabled() {
@@ -3066,7 +3171,7 @@ impl Screen<'_> {
             self.cancel_search(clipboard);
             self.clear_selection();
             let old_index = self.context_manager.current_index();
-            self.context_manager.set_current(clicked_tab);
+            self.context_manager.select_tab(clicked_tab);
             let new_index = self.context_manager.current_index();
             self.context_manager.switch_context_visibility(
                 &mut self.sugarloaf,
