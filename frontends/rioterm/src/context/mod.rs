@@ -76,6 +76,7 @@ pub struct Context<T: EventListener> {
     pub spawned_program: String,
     codex_activity_monitor: ActivityMonitor,
     codex_running: bool,
+    codex_activity_pending: bool,
     _io_thread: Option<JoinHandle<(Machine<teletypewriter::Pty, T>, performer::State)>>,
 }
 
@@ -96,28 +97,63 @@ impl<T: EventListener> Context<T> {
     #[inline]
     pub fn note_codex_prompt_submitted(&mut self) {
         #[cfg(not(target_os = "windows"))]
-        self.codex_activity_monitor
-            .note_prompt_submitted(self.shell_pid);
+        {
+            let state = self
+                .codex_activity_monitor
+                .note_prompt_submitted(self.shell_pid);
+            self.codex_running = state.running;
+            self.codex_activity_pending = state.needs_refresh;
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            self.codex_running = false;
+            self.codex_activity_pending = false;
+        }
+    }
+
+    #[inline]
+    pub fn note_codex_prompt_aborted(&mut self) {
+        #[cfg(not(target_os = "windows"))]
+        {
+            let state = self
+                .codex_activity_monitor
+                .note_prompt_aborted(self.shell_pid);
+            self.codex_running = state.running;
+            self.codex_activity_pending = state.needs_refresh;
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            self.codex_running = false;
+            self.codex_activity_pending = false;
+        }
     }
 
     #[inline]
     pub fn refresh_codex_activity(&mut self) {
         #[cfg(not(target_os = "windows"))]
         {
-            self.codex_running = self
-                .codex_activity_monitor
-                .is_prompt_running(self.shell_pid);
+            let state = self.codex_activity_monitor.activity(self.shell_pid);
+            self.codex_running = state.running;
+            self.codex_activity_pending = state.needs_refresh;
         }
 
         #[cfg(target_os = "windows")]
         {
             self.codex_running = false;
+            self.codex_activity_pending = false;
         }
     }
 
     #[inline]
     pub fn codex_is_running(&self) -> bool {
         self.codex_running
+    }
+
+    #[inline]
+    pub fn codex_activity_needs_refresh(&self) -> bool {
+        self.codex_activity_pending
     }
 
     #[inline]
@@ -247,6 +283,7 @@ pub fn create_dead_context<T: rio_backend::event::EventListener>(
         spawned_program: String::new(),
         codex_activity_monitor: ActivityMonitor::default(),
         codex_running: false,
+        codex_activity_pending: false,
         _io_thread: None,
     }
 }
@@ -445,6 +482,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             spawned_program: spawned_program_name(config),
             codex_activity_monitor: ActivityMonitor::default(),
             codex_running: false,
+            codex_activity_pending: false,
             _io_thread: io_thread,
         };
         context.title = ContextTitle {
@@ -966,19 +1004,32 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
     /// splits, so the workspace rail can show activity without selecting it.
     pub fn refresh_codex_activity(&mut self) -> bool {
         let mut any_running = false;
+        let mut any_pending = false;
         for grid in &mut self.contexts {
             for item in grid.contexts_mut().values_mut() {
                 item.val.refresh_codex_activity();
                 any_running |= item.val.codex_is_running();
+                any_pending |= item.val.codex_activity_needs_refresh();
             }
         }
-        any_running
+        any_running || any_pending
     }
 
     #[inline]
     pub fn note_codex_input(&mut self, bytes: &[u8]) {
-        if bytes.iter().any(|byte| *byte == b'\r' || *byte == b'\n') {
-            self.current_mut().note_codex_prompt_submitted();
+        let submitted = bytes.iter().any(|byte| *byte == b'\r' || *byte == b'\n');
+        let aborted = bytes.contains(&0x03);
+        if submitted || aborted {
+            if aborted {
+                self.current_mut().note_codex_prompt_aborted();
+            } else {
+                self.current_mut().note_codex_prompt_submitted();
+            }
+
+            // Start the probe/render loop immediately. Without this, a quiet
+            // Codex phase can leave the first missed process probe with no
+            // future frame in which to discover the process or transcript.
+            self.request_render();
         }
     }
 

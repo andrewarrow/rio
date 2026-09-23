@@ -8,6 +8,12 @@ pub struct ActivityMonitor {
     inner: macos::Monitor,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActivityState {
+    pub running: bool,
+    pub needs_refresh: bool,
+}
+
 impl Default for ActivityMonitor {
     fn default() -> Self {
         Self {
@@ -18,29 +24,43 @@ impl Default for ActivityMonitor {
 }
 
 impl ActivityMonitor {
-    pub fn note_prompt_submitted(&mut self, shell_pid: u32) {
+    pub fn note_prompt_submitted(&mut self, shell_pid: u32) -> ActivityState {
         #[cfg(target_os = "macos")]
-        self.inner.note_prompt_submitted(shell_pid);
-
-        #[cfg(not(target_os = "macos"))]
-        let _ = shell_pid;
-    }
-
-    pub fn is_prompt_running(&mut self, shell_pid: u32) -> bool {
-        #[cfg(target_os = "macos")]
-        return self.inner.is_prompt_running(shell_pid);
+        return self.inner.note_prompt_submitted(shell_pid);
 
         #[cfg(not(target_os = "macos"))]
         {
             let _ = shell_pid;
-            false
+            ActivityState::default()
+        }
+    }
+
+    pub fn note_prompt_aborted(&mut self, shell_pid: u32) -> ActivityState {
+        #[cfg(target_os = "macos")]
+        return self.inner.note_prompt_aborted(shell_pid);
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = shell_pid;
+            ActivityState::default()
+        }
+    }
+
+    pub fn activity(&mut self, shell_pid: u32) -> ActivityState {
+        #[cfg(target_os = "macos")]
+        return self.inner.activity(shell_pid);
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = shell_pid;
+            ActivityState::default()
         }
     }
 }
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::PathBuf;
+    use super::{ActivityState, PathBuf};
     use serde_json::Value;
     use std::collections::HashMap;
     use std::ffi::CStr;
@@ -50,7 +70,15 @@ mod macos {
     use std::path::Path;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    const PROMPT_SUBMISSION_GRACE: Duration = Duration::from_secs(5);
+    // The first process/transcript probe can race Codex spawning its worker or
+    // creating the session file. Keep the probe alive long enough to cover
+    // that handoff, but let ordinary shell input settle quickly.
+    const PROMPT_PROBE_GRACE: Duration = Duration::from_secs(8);
+    // Once a Codex process is found, allow a quiet startup phase (for example
+    // image loading) before giving up if no task_started event is visible yet.
+    const TASK_START_GRACE: Duration = Duration::from_secs(30);
+    const PROCESS_MISSING_GRACE: Duration = Duration::from_secs(2);
+    const EVENT_TIME_SKEW: Duration = Duration::from_secs(2);
     const TRANSCRIPT_READ_LIMIT: usize = 256 * 1024;
     const PROC_ALL_PIDS: u32 = 1;
 
@@ -63,62 +91,102 @@ mod macos {
         pending_transcript_data: Vec<u8>,
         prompt_is_running: bool,
         prompt_submission_deadline: Option<Instant>,
+        prompt_submitted_at: Option<SystemTime>,
+        process_last_seen: Option<Instant>,
     }
 
     impl Monitor {
-        pub(super) fn note_prompt_submitted(&mut self, shell_pid: u32) {
-            let Some(process) = codex_process(shell_pid as libc::pid_t) else {
-                return;
-            };
+        pub(super) fn note_prompt_submitted(&mut self, shell_pid: u32) -> ActivityState {
+            let process = codex_process(shell_pid as libc::pid_t);
+            if let Some(process) = process.as_ref() {
+                self.set_process(process);
+                self.process_last_seen = Some(Instant::now());
+            }
 
-            self.set_process(&process);
-            self.prompt_is_running = true;
-            self.prompt_submission_deadline =
-                Some(Instant::now() + PROMPT_SUBMISSION_GRACE);
+            self.prompt_is_running = process.is_some();
+            self.prompt_submitted_at = Some(SystemTime::now());
+            self.prompt_submission_deadline = Some(
+                Instant::now()
+                    + if process.is_some() {
+                        TASK_START_GRACE
+                    } else {
+                        PROMPT_PROBE_GRACE
+                    },
+            );
+
+            self.state()
         }
 
-        pub(super) fn is_prompt_running(&mut self, shell_pid: u32) -> bool {
-            let Some(process) = codex_process(shell_pid as libc::pid_t) else {
-                self.reset(None);
-                return false;
-            };
+        pub(super) fn note_prompt_aborted(&mut self, shell_pid: u32) -> ActivityState {
+            let _ = shell_pid;
+            self.finish_prompt();
+            self.state()
+        }
 
-            self.set_process(&process);
+        pub(super) fn activity(&mut self, shell_pid: u32) -> ActivityState {
+            let now = Instant::now();
+            let process = codex_process(shell_pid as libc::pid_t);
 
-            if self.transcript_path.is_none() {
-                self.transcript_path = find_transcript(&process);
-            }
-            if let Some(path) = self.transcript_path.clone() {
-                self.read_new_events(&path);
+            if let Some(process) = process.as_ref() {
+                self.set_process(process);
+                self.process_last_seen = Some(now);
+
+                if self.prompt_submission_deadline.is_some() {
+                    self.prompt_is_running = true;
+                }
+
+                if self.transcript_path.is_none() {
+                    self.transcript_path = find_transcript(process);
+                }
+                if let Some(path) = self.transcript_path.clone() {
+                    self.read_new_events(&path);
+                }
+            } else if self.process_last_seen.is_none_or(|last_seen| {
+                now.duration_since(last_seen) > PROCESS_MISSING_GRACE
+            }) && self.prompt_submission_deadline.is_none()
+            {
+                self.finish_prompt();
             }
 
             if self
                 .prompt_submission_deadline
-                .is_some_and(|deadline| deadline < Instant::now())
+                .is_some_and(|deadline| deadline <= now)
             {
-                self.prompt_submission_deadline = None;
-                self.prompt_is_running = false;
+                self.finish_prompt();
             }
 
-            self.prompt_is_running
+            self.state()
         }
 
         fn set_process(&mut self, process: &CodexProcess) {
             if self.process_id != Some(process.id)
                 || self.process_started_at != Some(process.started_at)
             {
-                self.reset(Some(process));
+                self.reset_process(Some(process));
             }
         }
 
-        fn reset(&mut self, process: Option<&CodexProcess>) {
+        fn reset_process(&mut self, process: Option<&CodexProcess>) {
             self.process_id = process.map(|process| process.id);
             self.process_started_at = process.map(|process| process.started_at);
             self.transcript_path = None;
             self.transcript_offset = 0;
             self.pending_transcript_data.clear();
+        }
+
+        fn finish_prompt(&mut self) {
             self.prompt_is_running = false;
             self.prompt_submission_deadline = None;
+            self.prompt_submitted_at = None;
+            self.process_last_seen = None;
+        }
+
+        fn state(&self) -> ActivityState {
+            ActivityState {
+                running: self.prompt_is_running,
+                needs_refresh: self.prompt_is_running
+                    || self.prompt_submission_deadline.is_some(),
+            }
         }
 
         fn read_new_events(&mut self, path: &Path) {
@@ -132,7 +200,6 @@ mod macos {
             if file_size < self.transcript_offset {
                 self.transcript_offset = 0;
                 self.pending_transcript_data.clear();
-                self.prompt_is_running = false;
             }
             if file_size == self.transcript_offset {
                 return;
@@ -167,23 +234,51 @@ mod macos {
                     continue;
                 }
 
-                match envelope
-                    .get("payload")
-                    .and_then(|payload| payload.get("type"))
-                    .and_then(Value::as_str)
-                {
-                    Some("task_started") => {
+                let Some(payload) = envelope.get("payload") else {
+                    continue;
+                };
+                let Some(event_type) = payload.get("type").and_then(Value::as_str) else {
+                    continue;
+                };
+                if !self.event_belongs_to_submitted_prompt(payload) {
+                    continue;
+                }
+
+                match event_type {
+                    "task_started" => {
                         self.prompt_submission_deadline = None;
                         self.prompt_is_running = true;
                     }
-                    Some("task_complete") | Some("turn_aborted")
-                        if self.prompt_submission_deadline.is_none() =>
-                    {
-                        self.prompt_is_running = false;
+                    "task_complete" | "turn_aborted" => {
+                        self.finish_prompt();
                     }
                     _ => {}
                 }
             }
+        }
+
+        fn event_belongs_to_submitted_prompt(&self, payload: &Value) -> bool {
+            let Some(submitted_at) = self.prompt_submitted_at else {
+                return true;
+            };
+            let Some(timestamp) = payload
+                .get("started_at")
+                .or_else(|| payload.get("completed_at"))
+                .and_then(Value::as_u64)
+            else {
+                // Current Codex lifecycle events carry timestamps. If a
+                // future version omits one, the pending state is safer than
+                // allowing an old completion record to hide a live spinner.
+                return self.prompt_submission_deadline.is_none();
+            };
+
+            let Some(event_at) = UNIX_EPOCH.checked_add(Duration::from_secs(timestamp))
+            else {
+                return false;
+            };
+            event_at
+                .checked_add(EVENT_TIME_SKEW)
+                .is_some_and(|event_at| event_at >= submitted_at)
         }
     }
 
@@ -223,7 +318,7 @@ mod macos {
                 continue;
             };
 
-            let is_native_codex = info.name == "codex" || info.name.starts_with("codex-");
+            let is_native_codex = is_codex_process_name(&info.name);
             let is_codex_launcher = info.arguments.iter().any(|argument| {
                 Path::new(argument)
                     .file_name()
@@ -300,7 +395,7 @@ mod macos {
             let name = unsafe { CStr::from_ptr(info.pbi_comm.as_ptr()) }
                 .to_string_lossy()
                 .to_ascii_lowercase();
-            let arguments = if name == "node" || name == "codex" {
+            let arguments = if name == "node" || is_codex_process_name(&name) {
                 process_arguments(pid)
             } else {
                 Vec::new()
@@ -319,6 +414,16 @@ mod macos {
             );
         }
         result
+    }
+
+    fn is_codex_process_name(name: &str) -> bool {
+        // Release builds normally appear as `codex`/`codex-*`; local Cargo
+        // builds use `rust-codex`. Keep this name-based check narrow enough
+        // that unrelated processes cannot turn every shell into a spinner.
+        name == "codex"
+            || name.starts_with("codex-")
+            || name == "rust-codex"
+            || name.starts_with("rust-codex-")
     }
 
     fn current_directory(pid: libc::pid_t) -> Option<PathBuf> {
@@ -475,5 +580,25 @@ mod macos {
 
     fn normalize_directory(path: &Path) -> PathBuf {
         fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::is_codex_process_name;
+
+        #[test]
+        fn recognizes_release_and_development_codex_names() {
+            assert!(is_codex_process_name("codex"));
+            assert!(is_codex_process_name("codex-tui"));
+            assert!(is_codex_process_name("rust-codex"));
+            assert!(is_codex_process_name("rust-codex-debug"));
+        }
+
+        #[test]
+        fn rejects_unrelated_process_names() {
+            assert!(!is_codex_process_name("node"));
+            assert!(!is_codex_process_name("code"));
+            assert!(!is_codex_process_name("codexhelper"));
+        }
     }
 }

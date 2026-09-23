@@ -35,7 +35,8 @@ use rio_backend::config::Config;
 use rio_backend::event::EventProxy;
 use rio_backend::sugarloaf::text::DrawOpts;
 use rio_backend::sugarloaf::Sugarloaf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 // Hint tooltip: browser-style status pill showing where the hovered
 // link goes. Shares the overlay draw order with search / palette.
@@ -51,6 +52,7 @@ const TOOLTIP_DEPTH_BG: f32 = 0.1;
 const TOOLTIP_ORDER: u8 = 20;
 const CODEX_SPINNER_FRAMES: [&str; 10] =
     ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+static CODEX_SPINNER_EPOCH: OnceLock<Instant> = OnceLock::new();
 
 /// Longest prefix of `text` that still fits `max_width` once an
 /// ellipsis is appended, or `text` untouched when it already fits.
@@ -431,9 +433,10 @@ impl Renderer {
                 .unwrap_or_else(|| String::from("Workspace"));
             let tab_count = context_manager.workspace_tab_count(index);
             let spinner = if codex_running {
-                let millis = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_or(0, |duration| duration.as_millis());
+                let millis = CODEX_SPINNER_EPOCH
+                    .get_or_init(Instant::now)
+                    .elapsed()
+                    .as_millis();
                 let frame = ((millis / 100) as usize) % CODEX_SPINNER_FRAMES.len();
                 sugarloaf.text_mut().draw(
                     18.0,
@@ -649,8 +652,8 @@ impl Renderer {
         sugarloaf: &mut Sugarloaf,
         context_manager: &mut ContextManager<EventProxy>,
     ) -> (Option<crate::context::renderable::WindowUpdate>, bool) {
-        let has_running_codex = context_manager.refresh_codex_activity();
-        if has_running_codex {
+        let codex_needs_refresh = context_manager.refresh_codex_activity();
+        if codex_needs_refresh {
             context_manager.schedule_render_on_route(100);
         }
 
