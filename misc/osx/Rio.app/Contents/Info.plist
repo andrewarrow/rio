@@ -95,7 +95,7 @@
   <key>MDItemKeywords</key>
   <string>Terminal</string>
   <key>CFBundleShortVersionString</key>
-  <string>{{.Version}}</string>
+  <string>{{.ShortCommit}}</string>
   <key>CFBundleVersion</key>
   <string>{{.Version}}.{{.Now.Format "20060102150405"}}</string>
   <key>CFBundleURLTypes</key>
