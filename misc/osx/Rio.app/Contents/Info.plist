@@ -96,8 +96,6 @@
   <string>Terminal</string>
   <key>CFBundleShortVersionString</key>
   <string>{{.ShortCommit}}</string>
-  <key>CFBundleVersion</key>
-  <string>{{.Version}}.{{.Now.Format "20060102150405"}}</string>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>
