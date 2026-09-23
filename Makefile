@@ -1,8 +1,10 @@
 BUILD_MISC_DIR = misc
 TARGET = rio
 TARGET_DIR = target/release
+DEBUG_TARGET_DIR = target/debug
 TARGET_DIR_DEBIAN = target/debian
 TARGET_DIR_OSX = $(TARGET_DIR)/osx
+DEBUG_TARGET_DIR_OSX = $(DEBUG_TARGET_DIR)/osx
 RELEASE_DIR = release
 
 APP_NAME = Rio.app
@@ -10,6 +12,8 @@ APP_TEMPLATE = $(BUILD_MISC_DIR)/osx/$(APP_NAME)
 APP_BINARY = $(TARGET_DIR)/$(TARGET)
 APP_BINARY_DIR = $(TARGET_DIR_OSX)/$(APP_NAME)/Contents/MacOS
 APP_EXTRAS_DIR = $(TARGET_DIR_OSX)/$(APP_NAME)/Contents/Resources
+DEBUG_APP_BINARY_DIR = $(DEBUG_TARGET_DIR_OSX)/$(APP_NAME)/Contents/MacOS
+DEBUG_APP_EXTRAS_DIR = $(DEBUG_TARGET_DIR_OSX)/$(APP_NAME)/Contents/Resources
 TERMINFO = $(BUILD_MISC_DIR)/rio.terminfo
 
 all: install run
@@ -54,6 +58,15 @@ $(TARGET)-universal:
 	@lipo target/{x86_64,aarch64}-apple-darwin/release/$(TARGET) -create -output $(APP_BINARY)
 
 app-universal: $(APP_NAME)-universal ## Create a universal Rio.app
+
+app-aarch64-debug: ## Create an Apple Silicon-only Rio.app
+	RUSTFLAGS='-C link-arg=-s' MACOSX_DEPLOYMENT_TARGET="11.0" cargo build --target=aarch64-apple-darwin
+	@mkdir -p $(DEBUG_APP_BINARY_DIR)
+	@mkdir -p $(DEBUG_APP_EXTRAS_DIR)
+	@cp -fRp $(APP_TEMPLATE) $(DEBUG_TARGET_DIR_OSX)
+	@cp -fp target/aarch64-apple-darwin/debug/$(TARGET) $(DEBUG_APP_BINARY_DIR)
+	@touch -r "target/aarch64-apple-darwin/debug/$(TARGET)" "$(DEBUG_TARGET_DIR_OSX)/$(APP_NAME)"
+	@echo "Created '$(APP_NAME)' in '$(DEBUG_TARGET_DIR_OSX)'"
 
 app-aarch64: ## Create an Apple Silicon-only Rio.app
 	RUSTFLAGS='-C link-arg=-s' MACOSX_DEPLOYMENT_TARGET="11.0" cargo build --release --target=aarch64-apple-darwin
