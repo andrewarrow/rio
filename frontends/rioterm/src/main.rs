@@ -7,6 +7,7 @@
 mod application;
 mod bindings;
 mod cli;
+mod codex;
 mod constants;
 mod context;
 mod global_hotkey;

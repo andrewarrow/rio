@@ -866,6 +866,7 @@ impl Screen<'_> {
                 _ => build_key_sequence(key, mods, mode),
             };
 
+            self.context_manager.note_codex_input(&bytes);
             self.ctx_mut().current_mut().messenger.send_write(bytes);
 
             return;
@@ -989,6 +990,7 @@ impl Screen<'_> {
             self.scroll_bottom_when_cursor_not_visible();
             self.clear_selection();
 
+            self.context_manager.note_codex_input(&bytes);
             self.ctx_mut().current_mut().messenger.send_write(bytes);
         }
     }
@@ -3950,6 +3952,7 @@ impl Screen<'_> {
                 text.to_owned().into_bytes()
             };
 
+            self.context_manager.note_codex_input(&payload);
             self.ctx_mut().current_mut().messenger.send_write(payload);
         }
     }

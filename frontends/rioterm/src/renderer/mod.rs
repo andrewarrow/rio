@@ -35,6 +35,7 @@ use rio_backend::config::Config;
 use rio_backend::event::EventProxy;
 use rio_backend::sugarloaf::text::DrawOpts;
 use rio_backend::sugarloaf::Sugarloaf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // Hint tooltip: browser-style status pill showing where the hovered
 // link goes. Shares the overlay draw order with search / palette.
@@ -48,6 +49,8 @@ const TOOLTIP_BG_COLOR: [f32; 4] = [0.12, 0.12, 0.12, 0.96];
 const TOOLTIP_TEXT_COLOR: [u8; 4] = [237, 237, 237, 255];
 const TOOLTIP_DEPTH_BG: f32 = 0.1;
 const TOOLTIP_ORDER: u8 = 20;
+const CODEX_SPINNER_FRAMES: [&str; 10] =
+    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Longest prefix of `text` that still fits `max_width` once an
 /// ellipsis is appended, or `text` untouched when it already fits.
@@ -407,6 +410,8 @@ impl Renderer {
         for index in 0..context_manager.workspace_count() {
             let y = DRAWER_ROW_TOP + index as f32 * DRAWER_ROW_STRIDE;
             let active = index == context_manager.active_workspace();
+            let codex_running = context_manager.workspace_has_running_codex(index);
+            let text_x = if codex_running { 38.0 } else { 18.0 };
             if active {
                 sugarloaf.rounded_rect(
                     None,
@@ -425,6 +430,21 @@ impl Renderer {
                 .workspace_name(index)
                 .unwrap_or_else(|| String::from("Workspace"));
             let tab_count = context_manager.workspace_tab_count(index);
+            let spinner = if codex_running {
+                let millis = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |duration| duration.as_millis());
+                let frame = ((millis / 100) as usize) % CODEX_SPINNER_FRAMES.len();
+                sugarloaf.text_mut().draw(
+                    18.0,
+                    y + 8.0,
+                    CODEX_SPINNER_FRAMES[frame],
+                    if active { &active_row_opts } else { &row_opts },
+                );
+                true
+            } else {
+                false
+            };
             let label = format!(
                 "{}{}",
                 if context_manager.workspace_has_bell(index) {
@@ -437,19 +457,22 @@ impl Renderer {
             let label = {
                 let ui = sugarloaf.text_mut();
                 let opts = if active { &active_row_opts } else { &row_opts };
-                elide_tail(&label, (width - 36.0).max(0.0), |text| {
+                elide_tail(&label, (width - text_x - 8.0).max(0.0), |text| {
                     ui.measure(text, opts)
                 })
             };
             let opts = if active { &active_row_opts } else { &row_opts };
-            sugarloaf.text_mut().draw(18.0, y + 8.0, &label, opts);
+            sugarloaf.text_mut().draw(text_x, y + 8.0, &label, opts);
             let count = format!(
                 "{tab_count} {}",
                 if tab_count == 1 { "tab" } else { "tabs" }
             );
-            sugarloaf
-                .text_mut()
-                .draw(18.0, y + 25.0, &count, &muted_opts);
+            sugarloaf.text_mut().draw(
+                if spinner { text_x } else { 18.0 },
+                y + 25.0,
+                &count,
+                &muted_opts,
+            );
         }
 
         // The handle remains a small, quiet hit target at the drawer edge.
@@ -626,6 +649,11 @@ impl Renderer {
         sugarloaf: &mut Sugarloaf,
         context_manager: &mut ContextManager<EventProxy>,
     ) -> (Option<crate::context::renderable::WindowUpdate>, bool) {
+        let has_running_codex = context_manager.refresh_codex_activity();
+        if has_running_codex {
+            context_manager.schedule_render_on_route(100);
+        }
+
         let mut any_panel_dirty = false;
         let grid = context_manager.current_grid_mut();
         let active_route = grid.current().route_id;

@@ -2,6 +2,7 @@ pub mod renderable;
 pub mod title;
 
 use crate::ansi::CursorShape;
+use crate::codex::ActivityMonitor;
 use crate::context::title::{update_title, ContextTitle};
 use crate::event::sync::FairMutex;
 use crate::event::{Msg, RioEvent};
@@ -73,6 +74,8 @@ pub struct Context<T: EventListener> {
     /// `{{ program }}` and the empty-title strip fallback without ever
     /// inspecting the foreground process.
     pub spawned_program: String,
+    codex_activity_monitor: ActivityMonitor,
+    codex_running: bool,
     _io_thread: Option<JoinHandle<(Machine<teletypewriter::Pty, T>, performer::State)>>,
 }
 
@@ -90,6 +93,33 @@ impl<T: rio_backend::event::EventListener> Drop for Context<T> {
 }
 
 impl<T: EventListener> Context<T> {
+    #[inline]
+    pub fn note_codex_prompt_submitted(&mut self) {
+        #[cfg(not(target_os = "windows"))]
+        self.codex_activity_monitor
+            .note_prompt_submitted(self.shell_pid);
+    }
+
+    #[inline]
+    pub fn refresh_codex_activity(&mut self) {
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.codex_running = self
+                .codex_activity_monitor
+                .is_prompt_running(self.shell_pid);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            self.codex_running = false;
+        }
+    }
+
+    #[inline]
+    pub fn codex_is_running(&self) -> bool {
+        self.codex_running
+    }
+
     #[inline]
     pub fn set_selection(&mut self, selection_range: Option<SelectionRange>) {
         let old_selection = self.renderable_content.selection_range;
@@ -215,6 +245,8 @@ pub fn create_dead_context<T: rio_backend::event::EventListener>(
         title: ContextTitle::default(),
         title_dirty: false,
         spawned_program: String::new(),
+        codex_activity_monitor: ActivityMonitor::default(),
+        codex_running: false,
         _io_thread: None,
     }
 }
@@ -411,6 +443,8 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             title: ContextTitle::default(),
             title_dirty: false,
             spawned_program: spawned_program_name(config),
+            codex_activity_monitor: ActivityMonitor::default(),
+            codex_running: false,
             _io_thread: io_thread,
         };
         context.title = ContextTitle {
@@ -915,6 +949,37 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             .tab_indices(index)
             .iter()
             .any(|&tab| self.contexts.get(tab).is_some_and(|grid| grid.bell))
+    }
+
+    #[inline]
+    pub fn workspace_has_running_codex(&self, index: usize) -> bool {
+        self.workspaces.tab_indices(index).iter().any(|&tab| {
+            self.contexts.get(tab).is_some_and(|grid| {
+                grid.contexts()
+                    .values()
+                    .any(|item| item.val.codex_is_running())
+            })
+        })
+    }
+
+    /// Refresh Codex state for every pane, including background tabs and
+    /// splits, so the workspace rail can show activity without selecting it.
+    pub fn refresh_codex_activity(&mut self) -> bool {
+        let mut any_running = false;
+        for grid in &mut self.contexts {
+            for item in grid.contexts_mut().values_mut() {
+                item.val.refresh_codex_activity();
+                any_running |= item.val.codex_is_running();
+            }
+        }
+        any_running
+    }
+
+    #[inline]
+    pub fn note_codex_input(&mut self, bytes: &[u8]) {
+        if bytes.iter().any(|byte| *byte == b'\r' || *byte == b'\n') {
+            self.current_mut().note_codex_prompt_submitted();
+        }
     }
 
     /// Create a workspace. Its first tab is created by the screen after
