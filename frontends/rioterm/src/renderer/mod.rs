@@ -376,7 +376,7 @@ impl Renderer {
         let header_width = (add_x - title_x - 8.0).max(0.0);
         let header = {
             let ui = sugarloaf.text_mut();
-            elide_tail("Workspaces", header_width, |text| {
+            elide_tail("", header_width, |text| {
                 ui.measure(text, &title_opts)
             })
         };
