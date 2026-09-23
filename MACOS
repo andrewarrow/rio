@@ -1,0 +1,1 @@
+cp target/debug/rio /Users/aa/rio/target/release/osx/Rio.app/Contents/MacOS
