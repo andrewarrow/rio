@@ -3,6 +3,7 @@ use cfg_aliases::cfg_aliases;
 fn main() {
     // The script doesn't depend on our code
     println!("cargo:rerun-if-changed=build.rs");
+    set_git_sha();
 
     // Setup cfg aliases
     cfg_aliases! {
@@ -39,6 +40,22 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     generate_dispatch_bindings();
+}
+
+fn set_git_sha() {
+    println!("cargo:rerun-if-changed=../.git/HEAD");
+    println!("cargo:rerun-if-changed=../.git/index");
+
+    let git_sha = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|sha| !sha.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned());
+
+    println!("cargo:rustc-env=RIO_GIT_SHA={git_sha}");
 }
 
 #[cfg(target_os = "macos")]

@@ -35,7 +35,7 @@ pub fn initialize(app: &NSApplication) {
     let about_item = menu_item(
         mtm,
         &about_item_title,
-        Some(sel!(orderFrontStandardAboutPanel:)),
+        Some(sel!(rioOrderFrontStandardAboutPanel:)),
         None,
     );
 

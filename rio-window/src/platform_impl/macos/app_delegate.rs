@@ -15,10 +15,12 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSAboutPanelOptionApplicationVersion, NSApplication, NSApplicationActivationPolicy,
+    NSApplicationDelegate,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSArray, NSObject, NSObjectProtocol, NSSize, NSURL,
+    MainThreadMarker, NSArray, NSDictionary, NSObject, NSObjectProtocol, NSSize,
+    NSString, NSURL,
 };
 
 use super::event_handler::EventHandler;
@@ -261,6 +263,18 @@ declare_class!(
 
  // Custom methods for menu actions
     unsafe impl ApplicationDelegate {
+        #[method(rioOrderFrontStandardAboutPanel:)]
+        fn order_front_about_panel(&self, _sender: Option<&AnyObject>) {
+            let version = NSString::from_str(env!("RIO_GIT_SHA"));
+            let version_key = unsafe { NSAboutPanelOptionApplicationVersion };
+            let options = NSDictionary::from_id_slice(
+                &[version_key],
+                &[unsafe { Retained::cast(version) }],
+            );
+            let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
+            unsafe { app.orderFrontStandardAboutPanelWithOptions(&options) };
+        }
+
         #[method(rioCreateWindow:)]
         fn create_window(&self, _sender: Option<&AnyObject>) {
             if self.is_launched() {
