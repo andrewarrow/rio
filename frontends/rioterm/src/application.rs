@@ -40,6 +40,7 @@ pub struct Application<'a> {
     router: Router<'a>,
     scheduler: Scheduler,
     app_id: Option<String>,
+    last_focused_route: Option<rio_backend::event::WindowId>,
     global_hotkey: Option<crate::global_hotkey::GlobalHotkeys>,
     /// Frontmost app when the quake window was shown, re-activated
     /// when it hides so focus returns where the user was.
@@ -85,6 +86,7 @@ impl Application<'_> {
             router,
             scheduler,
             app_id,
+            last_focused_route: None,
             global_hotkey: None,
             #[cfg(target_os = "macos")]
             quake_previous_app: None,
@@ -2179,6 +2181,9 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
 
             WindowEvent::Focused(focused) => {
+                if focused {
+                    self.last_focused_route = Some(window_id);
+                }
                 if self.config.hide_cursor_when_typing {
                     route.window.winit_window.set_cursor_visible(true);
                 }
@@ -2414,7 +2419,8 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
         key: &rio_window::event::KeyEvent,
         modifiers: &rio_window::event::Modifiers,
     ) {
-        let window_id = match self.router.get_focused_route() {
+        let window_id = match self.router.get_focused_route().or(self.last_focused_route)
+        {
             Some(window_id) => window_id,
             None => return,
         };
@@ -2423,6 +2429,29 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             Some(window) => window,
             None => return,
         };
+
+        // The Edit menu already specifies Copy. Sending a synthetic key through
+        // the terminal input path can be swallowed by an active IME or hint mode.
+        if key.physical_key
+            == rio_window::keyboard::PhysicalKey::Code(
+                rio_window::keyboard::KeyCode::KeyC,
+            )
+            && modifiers.state() == rio_window::keyboard::ModifiersState::SUPER
+        {
+            route
+                .window
+                .screen
+                .copy_selection(ClipboardType::Clipboard, &mut self.router.clipboard);
+            if route
+                .window
+                .screen
+                .get_mode()
+                .contains(rio_backend::crosswords::Mode::VI)
+            {
+                route.window.screen.clear_selection();
+            }
+            return;
+        }
 
         // For menu-triggered events, we need to temporarily set the correct modifiers
         // since menu events don't trigger ModifiersChanged events.

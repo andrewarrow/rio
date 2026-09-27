@@ -4,6 +4,8 @@ use objc2::sel;
 use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
 use objc2_foundation::{ns_string, MainThreadMarker, NSProcessInfo, NSString};
 
+use super::app_delegate::ApplicationDelegate;
+
 pub struct KeyEquivalent<'a> {
     key: &'a NSString,
     masks: Option<NSEventModifierFlags>,
@@ -178,6 +180,10 @@ pub fn initialize(app: &NSApplication) {
             masks: Some(NSEventModifierFlags::NSEventModifierFlagCommand),
         }),
     );
+    // Route Copy to Rio's application delegate even when the current first
+    // responder is a text input client owned by the terminal or an IME.
+    let delegate = ApplicationDelegate::get(mtm);
+    unsafe { copy_item.setTarget(Some(&delegate)) };
     let paste_title = ns_string!("Paste");
     let paste_item = menu_item(
         mtm,
