@@ -18,6 +18,10 @@ TERMINFO = $(BUILD_MISC_DIR)/rio.terminfo
 
 all: install run
 
+# Machine-specific settings (for example, a persistent debug signing identity).
+-include Makefile.local
+MACOS_DEBUG_SIGN_IDENTITY ?= -
+
 run:
 	cargo run -p rioterm --release
 
@@ -65,6 +69,11 @@ app-aarch64-debug: ## Create an Apple Silicon-only Rio.app
 	@mkdir -p $(DEBUG_APP_EXTRAS_DIR)
 	@cp -fRp $(APP_TEMPLATE) $(DEBUG_TARGET_DIR_OSX)
 	@cp -fp target/aarch64-apple-darwin/debug/$(TARGET) $(DEBUG_APP_BINARY_DIR)
+	@codesign --force --sign "$(MACOS_DEBUG_SIGN_IDENTITY)" "$(DEBUG_TARGET_DIR_OSX)/$(APP_NAME)"
+	@codesign --verify --strict "$(DEBUG_TARGET_DIR_OSX)/$(APP_NAME)"
+	@if [ "$(MACOS_DEBUG_SIGN_IDENTITY)" = "-" ]; then \
+		echo "Warning: ad-hoc signing can reset macOS privacy permissions after rebuilds. See misc/osx/README.md."; \
+	fi
 	@touch -r "target/aarch64-apple-darwin/debug/$(TARGET)" "$(DEBUG_TARGET_DIR_OSX)/$(APP_NAME)"
 	@echo "Created '$(APP_NAME)' in '$(DEBUG_TARGET_DIR_OSX)'"
 
