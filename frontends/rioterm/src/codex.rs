@@ -79,6 +79,8 @@ mod macos {
     const TASK_START_GRACE: Duration = Duration::from_secs(30);
     const PROCESS_MISSING_GRACE: Duration = Duration::from_secs(2);
     const EVENT_TIME_SKEW: Duration = Duration::from_secs(2);
+    // Session metadata is written during startup, near the Codex process start.
+    const SESSION_START_WINDOW: Duration = Duration::from_secs(60);
     const TRANSCRIPT_READ_LIMIT: usize = 256 * 1024;
     const PROC_ALL_PIDS: u32 = 1;
 
@@ -286,7 +288,6 @@ mod macos {
         id: libc::pid_t,
         started_at: SystemTime,
         current_directory: PathBuf,
-        arguments: Vec<String>,
     }
 
     struct ProcessInfo {
@@ -335,7 +336,6 @@ mod macos {
                         id: pid,
                         started_at: info.started_at,
                         current_directory: directory,
-                        arguments: info.arguments.clone(),
                     };
                     if is_native_codex {
                         return Some(match_process);
@@ -488,6 +488,10 @@ mod macos {
 
     fn find_transcript(process: &CodexProcess) -> Option<PathBuf> {
         let root = dirs::home_dir()?.join(".codex").join("sessions");
+        find_transcript_in(&root, process)
+    }
+
+    fn find_transcript_in(root: &Path, process: &CodexProcess) -> Option<PathBuf> {
         let mut dates = Vec::new();
         if let Some(directory) = date_directory(&root, process.started_at) {
             dates.push(directory);
@@ -509,44 +513,30 @@ mod macos {
                 if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
                     continue;
                 }
-                let Some(directory) = transcript_working_directory(&path) else {
+                let Some((directory, started_at)) = transcript_session_metadata(&path)
+                else {
                     continue;
                 };
                 if normalize_directory(&directory) != process_directory {
                     continue;
                 }
-                let modified_at = entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .unwrap_or(UNIX_EPOCH);
-                candidates.push((path, modified_at));
+                candidates.push((path, started_at));
             }
         }
 
-        let recent_cutoff = process
-            .started_at
-            .checked_sub(Duration::from_secs(300))
-            .unwrap_or(UNIX_EPOCH);
+        // Modification time tracks recent output and may point every tab in
+        // the same directory at whichever Codex session wrote last.
         candidates
-            .iter()
-            .filter(|(_, modified_at)| *modified_at >= recent_cutoff)
-            .max_by_key(|(_, modified_at)| *modified_at)
-            .map(|(path, _)| path.clone())
-            .or_else(|| {
-                if process
-                    .arguments
-                    .iter()
-                    .any(|argument| argument == "resume")
-                {
-                    candidates
-                        .iter()
-                        .filter(|(_, modified_at)| *modified_at >= process.started_at)
-                        .max_by_key(|(_, modified_at)| *modified_at)
-                        .map(|(path, _)| path.clone())
-                } else {
-                    None
-                }
+            .into_iter()
+            .filter_map(|(path, started_at)| {
+                let distance = started_at
+                    .duration_since(process.started_at)
+                    .or_else(|_| process.started_at.duration_since(started_at))
+                    .ok()?;
+                (distance <= SESSION_START_WINDOW).then_some((path, distance))
             })
+            .min_by_key(|(_, distance)| *distance)
+            .map(|(path, _)| path)
     }
 
     fn date_directory(root: &Path, time: SystemTime) -> Option<PathBuf> {
@@ -562,7 +552,7 @@ mod macos {
         )
     }
 
-    fn transcript_working_directory(path: &Path) -> Option<PathBuf> {
+    fn transcript_session_metadata(path: &Path) -> Option<(PathBuf, SystemTime)> {
         let mut file = File::open(path).ok()?;
         let mut data = vec![0u8; TRANSCRIPT_READ_LIMIT];
         let count = file.read(&mut data).ok()?;
@@ -571,11 +561,50 @@ mod macos {
         if envelope.get("type").and_then(Value::as_str) != Some("session_meta") {
             return None;
         }
-        envelope
-            .get("payload")
-            .and_then(|payload| payload.get("cwd"))
+        let payload = envelope.get("payload")?;
+        let directory = payload
+            .get("cwd")
             .and_then(Value::as_str)
-            .map(PathBuf::from)
+            .map(PathBuf::from)?;
+        let started_at = payload
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_session_timestamp)?;
+        Some((directory, started_at))
+    }
+
+    fn parse_session_timestamp(timestamp: &str) -> Option<SystemTime> {
+        let timestamp = timestamp.strip_suffix('Z')?;
+        let (date, time) = timestamp.split_once('T')?;
+        let mut date = date.split('-');
+        let year = date.next()?.parse::<i32>().ok()?;
+        let month = date.next()?.parse::<i32>().ok()?;
+        let day = date.next()?.parse::<i32>().ok()?;
+        let mut time = time.split(':');
+        let hour = time.next()?.parse::<i32>().ok()?;
+        let minute = time.next()?.parse::<i32>().ok()?;
+        let second = time.next()?;
+        let (second, fraction) = second.split_once('.').unwrap_or((second, ""));
+        let second = second.parse::<i32>().ok()?;
+        let nanos = if fraction.is_empty() {
+            0
+        } else {
+            let precision = 9u32.checked_sub(u32::try_from(fraction.len()).ok()?)?;
+            fraction.parse::<u32>().ok()? * 10u32.pow(precision)
+        };
+
+        let mut tm: libc::tm = unsafe { mem::zeroed() };
+        tm.tm_year = year - 1900;
+        tm.tm_mon = month - 1;
+        tm.tm_mday = day;
+        tm.tm_hour = hour;
+        tm.tm_min = minute;
+        tm.tm_sec = second;
+        let seconds = unsafe { libc::timegm(&mut tm) };
+        let seconds = u64::try_from(seconds).ok()?;
+        UNIX_EPOCH
+            .checked_add(Duration::from_secs(seconds))?
+            .checked_add(Duration::from_nanos(nanos as u64))
     }
 
     fn normalize_directory(path: &Path) -> PathBuf {
@@ -584,7 +613,12 @@ mod macos {
 
     #[cfg(test)]
     mod tests {
-        use super::is_codex_process_name;
+        use super::{
+            date_directory, find_transcript_in, is_codex_process_name,
+            parse_session_timestamp, CodexProcess,
+        };
+        use std::fs;
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
         #[test]
         fn recognizes_release_and_development_codex_names() {
@@ -599,6 +633,60 @@ mod macos {
             assert!(!is_codex_process_name("node"));
             assert!(!is_codex_process_name("code"));
             assert!(!is_codex_process_name("codexhelper"));
+        }
+
+        #[test]
+        fn concurrent_sessions_in_one_directory_keep_their_own_transcripts() {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir()
+                .join(format!("rio-codex-sessions-{}-{nonce}", std::process::id()));
+            let cwd = root.join("workspace");
+            let first_started_at =
+                parse_session_timestamp("2026-09-27T15:41:50.564Z").unwrap();
+            let second_started_at =
+                parse_session_timestamp("2026-09-27T15:42:10.564Z").unwrap();
+            let session_dir = date_directory(&root, first_started_at).unwrap();
+            fs::create_dir_all(&session_dir).unwrap();
+            fs::create_dir_all(&cwd).unwrap();
+
+            let first_path = session_dir.join("first.jsonl");
+            let second_path = session_dir.join("second.jsonl");
+            for (path, timestamp) in [
+                (&first_path, "2026-09-27T15:41:50.564Z"),
+                (&second_path, "2026-09-27T15:42:10.564Z"),
+            ] {
+                let line = serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {"cwd": cwd, "timestamp": timestamp}
+                });
+                fs::write(path, format!("{line}\n")).unwrap();
+            }
+
+            let process = |started_at| CodexProcess {
+                id: 1,
+                started_at,
+                current_directory: cwd.clone(),
+            };
+            assert_eq!(
+                find_transcript_in(&root, &process(first_started_at)),
+                Some(first_path)
+            );
+            assert_eq!(
+                find_transcript_in(&root, &process(second_started_at)),
+                Some(second_path)
+            );
+            assert_eq!(
+                find_transcript_in(
+                    &root,
+                    &process(second_started_at + Duration::from_secs(120))
+                ),
+                None
+            );
+
+            fs::remove_dir_all(root).unwrap();
         }
     }
 }
