@@ -1202,11 +1202,15 @@ impl Screen<'_> {
                             terminal.vi_motion(*motion);
                         }
 
-                        if let Some(selection) = &terminal.selection {
-                            context.renderable_content.selection_range =
-                                selection.to_range(&terminal);
-                        };
+                        let has_selection = terminal.selection.is_some();
+                        let selection_range = terminal
+                            .selection
+                            .as_ref()
+                            .and_then(|selection| selection.to_range(&terminal));
                         drop(terminal);
+                        if has_selection {
+                            context.set_selection(selection_range);
+                        }
                         context
                             .renderable_content
                             .pending_update
@@ -2003,12 +2007,18 @@ impl Screen<'_> {
     }
 
     pub fn copy_selection(&mut self, ty: ClipboardType, clipboard: &mut Clipboard) {
-        let terminal = self.context_manager.current_mut().terminal.lock();
-        let text = match terminal.selection_to_string().filter(|s| !s.is_empty()) {
+        let current = self.context_manager.current();
+        let text = current.selected_text.clone().or_else(|| {
+            current
+                .terminal
+                .lock()
+                .selection_to_string()
+                .filter(|text| !text.is_empty())
+        });
+        let text = match text {
             Some(text) => text,
             None => return,
         };
-        drop(terminal);
 
         clipboard.set(ty, text);
     }
@@ -2097,9 +2107,10 @@ impl Screen<'_> {
         };
 
         selection.include_all();
-        current.renderable_content.selection_range = selection.to_range(&terminal);
+        let selection_range = selection.to_range(&terminal);
         terminal.selection = Some(selection);
         drop(terminal);
+        current.set_selection(selection_range);
     }
 
     #[inline]

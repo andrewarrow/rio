@@ -56,6 +56,9 @@ pub struct Context<T: EventListener> {
     pub route_id: usize,
     pub terminal: Arc<FairMutex<Crosswords<T>>>,
     pub renderable_content: RenderableContent,
+    /// Text captured when the visible selection last changed. A running TUI may
+    /// clear or redraw the selected cells before the user invokes Copy.
+    pub selected_text: Option<String>,
     pub messenger: Messenger,
     #[cfg(not(target_os = "windows"))]
     pub main_fd: Arc<i32>,
@@ -168,6 +171,12 @@ impl<T: EventListener> Context<T> {
                 .set_terminal_damage(rio_backend::event::TerminalDamage::Full);
         }
 
+        self.selected_text = selection_range.and_then(|_| {
+            self.terminal
+                .lock()
+                .selection_to_string()
+                .filter(|text| !text.is_empty())
+        });
         self.renderable_content.selection_range = selection_range;
     }
 
@@ -275,6 +284,7 @@ pub fn create_dead_context<T: rio_backend::event::EventListener>(
         child_terminator: teletypewriter::ChildTerminator::retired(),
         messenger: Messenger::new(sender),
         renderable_content: RenderableContent::new(Cursor::default()),
+        selected_text: None,
         terminal,
         rich_text_id,
         dimension,
@@ -476,6 +486,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             terminal,
             rich_text_id,
             renderable_content: RenderableContent::new(cursor_state.0.clone()),
+            selected_text: None,
             dimension,
             title: ContextTitle::default(),
             title_dirty: false,
@@ -1926,6 +1937,51 @@ pub fn process_open_url(
 pub mod test {
     use super::*;
     use crate::event::VoidListener;
+    use rio_backend::crosswords::pos::{Column, Line, Pos, Side};
+    use rio_backend::performer::handler::Processor;
+    use rio_backend::selection::{Selection, SelectionType};
+
+    #[test]
+    fn selected_text_survives_terminal_redraw_until_selection_is_cleared() {
+        let mut context = create_dead_context(
+            VoidListener {},
+            WindowId::from(0),
+            0,
+            0,
+            ContextDimension {
+                columns: 20,
+                lines: 5,
+                ..ContextDimension::default()
+            },
+        );
+        let mut parser = Processor::default();
+        let selection_range = {
+            let mut terminal = context.terminal.lock();
+            parser.advance(&mut *terminal, b"hello");
+            let mut selection = Selection::new(
+                SelectionType::Simple,
+                Pos::new(Line(0), Column(0)),
+                Side::Left,
+            );
+            selection.update(Pos::new(Line(0), Column(4)), Side::Right);
+            let range = selection.to_range(&terminal);
+            terminal.selection = Some(selection);
+            range
+        };
+
+        context.set_selection(selection_range);
+        assert_eq!(context.selected_text.as_deref(), Some("hello"));
+
+        {
+            let mut terminal = context.terminal.lock();
+            parser.advance(&mut *terminal, b"\r\x1b[2K");
+            assert!(terminal.selection.is_none());
+        }
+        assert_eq!(context.selected_text.as_deref(), Some("hello"));
+
+        context.set_selection(None);
+        assert_eq!(context.selected_text, None);
+    }
 
     #[test]
     fn test_capacity() {
