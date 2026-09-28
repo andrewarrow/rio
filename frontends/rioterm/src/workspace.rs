@@ -315,6 +315,22 @@ impl WorkspaceManager {
         }
     }
 
+    /// Return the tab that should become active when `tab_index` is removed.
+    /// Prefer the tab immediately to its left in the same workspace; when it
+    /// is the first tab, fall forward to the next tab in that workspace.
+    pub fn tab_after_removal(&self, tab_index: usize) -> Option<usize> {
+        let workspace = self
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.tabs.contains(&tab_index))?;
+        let position = workspace.tabs.iter().position(|&tab| tab == tab_index)?;
+
+        position
+            .checked_sub(1)
+            .and_then(|index| workspace.tabs.get(index).copied())
+            .or_else(|| workspace.tabs.get(position + 1).copied())
+    }
+
     pub fn add_tab(&mut self, tab_index: usize) {
         if let Some(workspace) = self.workspaces.get_mut(self.active) {
             workspace.tabs.push(tab_index);
@@ -474,6 +490,29 @@ mod tests {
         manager.add_tab(1);
         manager.remove_tab(0);
         assert_eq!(manager.tab_indices(0), &[0]);
+    }
+
+    #[test]
+    fn tab_after_removal_stays_in_the_same_workspace() {
+        let mut manager = WorkspaceManager::new();
+        manager.add_tab(1);
+        let second = manager.create();
+        manager.add_tab(2);
+        manager.add_tab(3);
+
+        assert_eq!(manager.tab_after_removal(1), Some(0));
+        assert_eq!(manager.tab_after_removal(0), Some(1));
+        assert_eq!(manager.tab_after_removal(2), Some(3));
+        assert_eq!(manager.tab_after_removal(3), Some(2));
+
+        manager.set_active(second);
+        assert_eq!(manager.tab_after_removal(0), Some(1));
+    }
+
+    #[test]
+    fn tab_after_removal_is_none_for_a_single_tab_workspace() {
+        let manager = WorkspaceManager::new();
+        assert_eq!(manager.tab_after_removal(0), None);
     }
 
     #[test]

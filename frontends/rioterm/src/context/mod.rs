@@ -700,6 +700,9 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         let Some(tab_index) = self.tab_index_for_route(route_id) else {
             return self.contexts.is_empty();
         };
+        let replacement_tab = (tab_index == self.current_index)
+            .then(|| self.workspaces.tab_after_removal(tab_index))
+            .flatten();
 
         // A split dies: remove just that panel, keep the tab. When
         // the tab is focused and its focused panel was the one that
@@ -725,7 +728,17 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         // when the focused tab itself died leaves `current_index`
         // past the end when a background tab exits first (the tmux
         // SIGHUP crash: len 1, index 1).
-        let new_index = current_index_after_tab_removal(self.current_index, tab_index);
+        let new_index = replacement_tab
+            .map(|replacement| {
+                if replacement > tab_index {
+                    replacement - 1
+                } else {
+                    replacement
+                }
+            })
+            .unwrap_or_else(|| {
+                current_index_after_tab_removal(self.current_index, tab_index)
+            });
         if tab_index == self.current_index {
             self.set_current(new_index);
         } else {
@@ -1468,21 +1481,25 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         }
 
         let index_to_remove = self.current_index;
-        let mut should_set_current = false;
-        if index_to_remove > 1 {
-            self.set_current(self.current_index - 1);
-        } else {
-            should_set_current = true;
-        }
+        let replacement_tab = self.workspaces.tab_after_removal(index_to_remove);
+        let new_index = replacement_tab
+            .map(|replacement| {
+                if replacement > index_to_remove {
+                    replacement - 1
+                } else {
+                    replacement
+                }
+            })
+            .unwrap_or_else(|| {
+                current_index_after_tab_removal(index_to_remove, index_to_remove)
+            });
 
         // Remove all rich text from the grid before removing the context
         self.contexts[index_to_remove].remove_from_sugarloaf(sugarloaf);
         self.contexts.remove(index_to_remove);
         self.workspaces.remove_tab(index_to_remove);
 
-        if should_set_current {
-            self.set_current(0);
-        }
+        self.set_current(new_index);
 
         if let Some(workspace) = self.workspaces.workspace_for_tab(self.current_index) {
             self.workspaces.set_active(workspace);
