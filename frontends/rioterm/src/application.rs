@@ -1543,8 +1543,18 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     }
                     ElementState::Released => {
                         if button == MouseButton::Left
-                            && route.window.screen.finish_workspace_drag()
+                            && route
+                                .window
+                                .screen
+                                .finish_workspace_drag(&mut self.router.clipboard)
                         {
+                            route.window.winit_window.set_cursor(
+                                route
+                                    .window
+                                    .screen
+                                    .workspace_cursor_icon()
+                                    .unwrap_or(CursorIcon::Default),
+                            );
                             route.request_redraw();
                             return;
                         }
@@ -1708,9 +1718,15 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                         .window
                         .screen
                         .update_workspace_drawer_width(x as f32 / scale_factor);
+                    route.window.screen.update_workspace_row_drag(
+                        x as f32 / scale_factor,
+                        y as f32 / scale_factor,
+                    );
                     route.window.winit_window.set_cursor(
                         if route.window.screen.workspace_resize_active() {
                             CursorIcon::ColResize
+                        } else if route.window.screen.workspace_row_drag_active() {
+                            CursorIcon::Grabbing
                         } else {
                             CursorIcon::Default
                         },

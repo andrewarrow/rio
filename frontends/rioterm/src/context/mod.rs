@@ -1069,6 +1069,11 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         self.workspaces.select(index)
     }
 
+    #[inline]
+    pub fn move_workspace(&mut self, from: usize, to: usize) -> bool {
+        self.workspaces.move_workspace(from, to)
+    }
+
     /// Persist the workspace layout and the last OSC 7 directory reported by
     /// each tab. The serialized bytes are cached so the event loop can call
     /// this after ordinary terminal events without rewriting an unchanged

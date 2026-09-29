@@ -209,6 +209,7 @@ pub struct Renderer {
     pub custom_mouse_cursor: bool,
     pub trail_cursor_enabled: bool,
     pub trail_cursor: trail_cursor::TrailCursor,
+    pub workspace_drop_target: Option<(usize, usize)>,
 }
 
 impl Renderer {
@@ -292,6 +293,7 @@ impl Renderer {
                 decay_slow: config.effects.trail_cursor_decay[1] as f32 / 1000.0,
                 start_threshold: config.effects.trail_cursor_start_threshold as f32,
             }),
+            workspace_drop_target: None,
         }
     }
 
@@ -376,9 +378,7 @@ impl Renderer {
         let header_width = (add_x - title_x - 8.0).max(0.0);
         let header = {
             let ui = sugarloaf.text_mut();
-            elide_tail("", header_width, |text| {
-                ui.measure(text, &title_opts)
-            })
+            elide_tail("", header_width, |text| ui.measure(text, &title_opts))
         };
         sugarloaf
             .text_mut()
@@ -476,6 +476,19 @@ impl Renderer {
                 &count,
                 &muted_opts,
             );
+        }
+
+        if let Some((from, target)) = self.workspace_drop_target {
+            if from != target {
+                let y = DRAWER_ROW_TOP
+                    + target as f32 * DRAWER_ROW_STRIDE
+                    + if from < target {
+                        DRAWER_ROW_HEIGHT + 3.0
+                    } else {
+                        -3.0
+                    };
+                sugarloaf.line(10.0, y, width - 10.0, y, 2.0, 0.0, plus, 34);
+            }
         }
 
         // The handle remains a small, quiet hit target at the drawer edge.

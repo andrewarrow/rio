@@ -293,6 +293,18 @@ impl WorkspaceManager {
         Some(tab)
     }
 
+    /// Move a workspace in the drawer without changing its selected tab.
+    pub fn move_workspace(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.workspaces.len() || to >= self.workspaces.len() || from == to {
+            return false;
+        }
+
+        let workspace = self.workspaces.remove(from);
+        self.workspaces.insert(to, workspace);
+        self.active = Self::remap_index(self.active, from, to);
+        true
+    }
+
     pub fn workspace_for_tab(&self, tab_index: usize) -> Option<usize> {
         self.workspaces
             .iter()
@@ -392,16 +404,15 @@ impl WorkspaceManager {
 
     pub fn move_tab(&mut self, from: usize, to: usize) {
         for workspace in &mut self.workspaces {
-            workspace.selected_tab =
-                Self::remap_tab_index(workspace.selected_tab, from, to);
+            workspace.selected_tab = Self::remap_index(workspace.selected_tab, from, to);
             for tab in &mut workspace.tabs {
-                *tab = Self::remap_tab_index(*tab, from, to);
+                *tab = Self::remap_index(*tab, from, to);
             }
             workspace.tabs.sort_unstable();
         }
     }
 
-    fn remap_tab_index(index: usize, from: usize, to: usize) -> usize {
+    fn remap_index(index: usize, from: usize, to: usize) -> usize {
         if index == from {
             to
         } else if from < to && index > from && index <= to {
@@ -436,7 +447,7 @@ impl Default for WorkspaceManager {
 mod tests {
     use super::{
         standardized_path, tab_title_for_directory, workspace_title_for_directory,
-        WorkspaceManager,
+        PersistedTab, WorkspaceManager,
     };
     use std::path::{Path, MAIN_SEPARATOR_STR};
 
@@ -507,6 +518,39 @@ mod tests {
 
         manager.set_active(second);
         assert_eq!(manager.tab_after_removal(0), Some(1));
+    }
+
+    #[test]
+    fn moving_workspaces_preserves_the_active_workspace_and_tabs() {
+        let mut manager = WorkspaceManager::new();
+        manager.create();
+        manager.add_tab(1);
+        manager.create();
+        manager.add_tab(2);
+        manager.set_active(1);
+
+        assert!(manager.move_workspace(0, 2));
+        assert_eq!(manager.active(), 0);
+        assert_eq!(manager.tab_indices(0), &[1]);
+        assert_eq!(manager.tab_indices(1), &[2]);
+        assert_eq!(manager.tab_indices(2), &[0]);
+        let state = manager.snapshot(|tab| PersistedTab {
+            title: tab.to_string(),
+            current_directory: None,
+        });
+        assert_eq!(state.active_workspace, 0);
+        assert_eq!(state.workspaces[0].tabs[0].title, "1");
+        assert_eq!(state.workspaces[1].tabs[0].title, "2");
+        assert_eq!(state.workspaces[2].tabs[0].title, "0");
+
+        assert!(manager.move_workspace(2, 0));
+        assert_eq!(manager.active(), 1);
+        assert_eq!(manager.tab_indices(0), &[0]);
+        assert!(manager.move_workspace(1, 2));
+        assert_eq!(manager.active(), 2);
+        assert_eq!(manager.selected_tab_for_active(), Some(1));
+        assert!(!manager.move_workspace(0, 0));
+        assert!(!manager.move_workspace(0, 3));
     }
 
     #[test]

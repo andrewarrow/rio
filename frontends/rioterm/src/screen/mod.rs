@@ -106,6 +106,7 @@ pub struct Screen<'screen> {
     pub resize_state: Option<crate::layout::ResizeState>,
     workspace_dragging: bool,
     workspace_consumed: bool,
+    workspace_row_drag: Option<WorkspaceRowDrag>,
     #[cfg(target_os = "macos")]
     pub allow_manual_dragging: bool,
     last_chrome_press: Option<ChromePress>,
@@ -117,6 +118,13 @@ pub struct Screen<'screen> {
 pub struct ChromePress {
     window_origin: Option<rio_window::dpi::PhysicalPosition<i32>>,
     at: std::time::Instant,
+}
+
+struct WorkspaceRowDrag {
+    from: usize,
+    target: usize,
+    press_y: f32,
+    started: bool,
 }
 
 impl ChromePress {
@@ -365,6 +373,7 @@ impl Screen<'_> {
             resize_state: None,
             workspace_dragging: false,
             workspace_consumed: false,
+            workspace_row_drag: None,
             #[cfg(target_os = "macos")]
             allow_manual_dragging: config.navigation.is_enabled(),
             last_chrome_press: None,
@@ -2669,21 +2678,52 @@ impl Screen<'_> {
             return true;
         }
         if row < self.context_manager.workspace_count() {
-            let old_index = self.context_manager.current_index();
-            if let Some(new_index) = self.context_manager.select_workspace(row) {
-                self.context_manager.set_current(new_index);
-                self.context_manager.switch_context_visibility(
-                    &mut self.sugarloaf,
-                    old_index,
-                    new_index,
-                );
-                self.stop_hint_mode_if_active();
-                self.cancel_search(clipboard);
-                self.clear_selection();
-                self.mark_dirty();
-            }
+            self.workspace_row_drag = Some(WorkspaceRowDrag {
+                from: row,
+                target: row,
+                press_y: y,
+                started: false,
+            });
         }
         true
+    }
+
+    fn select_workspace_row(&mut self, row: usize, clipboard: &mut Clipboard) {
+        let old_index = self.context_manager.current_index();
+        if let Some(new_index) = self.context_manager.select_workspace(row) {
+            self.context_manager.set_current(new_index);
+            self.context_manager.switch_context_visibility(
+                &mut self.sugarloaf,
+                old_index,
+                new_index,
+            );
+            self.stop_hint_mode_if_active();
+            self.cancel_search(clipboard);
+            self.clear_selection();
+            self.mark_dirty();
+        }
+    }
+
+    pub fn update_workspace_row_drag(&mut self, x: f32, y: f32) {
+        let Some(drag) = self.workspace_row_drag.as_mut() else {
+            return;
+        };
+        if !drag.started && (y - drag.press_y).abs() < 5.0 {
+            return;
+        }
+        drag.started = true;
+        let count = self.context_manager.workspace_count();
+        if count == 0 {
+            return;
+        }
+        let target = ((y - DRAWER_ROW_TOP + DRAWER_ROW_STRIDE / 2.0) / DRAWER_ROW_STRIDE)
+            .floor()
+            .clamp(0.0, (count - 1) as f32) as usize;
+        drag.target = target;
+        self.renderer.workspace_drop_target = (x >= 0.0
+            && x < self.context_manager.drawer_width())
+        .then_some((drag.from, target));
+        self.mark_dirty();
     }
 
     pub fn update_workspace_drawer_width(&mut self, x: f32) -> bool {
@@ -2718,6 +2758,12 @@ impl Screen<'_> {
         self.workspace_dragging
     }
 
+    pub fn workspace_row_drag_active(&self) -> bool {
+        self.workspace_row_drag
+            .as_ref()
+            .is_some_and(|drag| drag.started)
+    }
+
     pub fn workspace_cursor_icon(&self) -> Option<CursorIcon> {
         let scale = self.sugarloaf.scale_factor();
         let x = self.mouse.x as f32 / scale;
@@ -2738,16 +2784,28 @@ impl Screen<'_> {
             if row < self.context_manager.workspace_count()
                 && row_offset % DRAWER_ROW_STRIDE <= DRAWER_ROW_HEIGHT
             {
-                return Some(CursorIcon::Pointer);
+                return Some(CursorIcon::Grab);
             }
         }
         Some(CursorIcon::Default)
     }
 
-    pub fn finish_workspace_drag(&mut self) -> bool {
+    pub fn finish_workspace_drag(&mut self, clipboard: &mut Clipboard) -> bool {
         let was_dragging = self.workspace_consumed;
         self.workspace_dragging = false;
         self.workspace_consumed = false;
+        self.renderer.workspace_drop_target = None;
+        if let Some(drag) = self.workspace_row_drag.take() {
+            if drag.started {
+                let x = self.mouse.x as f32 / self.sugarloaf.scale_factor();
+                if x >= 0.0 && x < self.context_manager.drawer_width() {
+                    self.context_manager.move_workspace(drag.from, drag.target);
+                }
+                self.mark_dirty();
+            } else {
+                self.select_workspace_row(drag.from, clipboard);
+            }
+        }
         was_dragging
     }
 
