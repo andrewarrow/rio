@@ -1826,12 +1826,23 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     return;
                 }
 
-                if let Some(cursor) = route.window.screen.workspace_cursor_icon() {
-                    if route.window.screen.clear_close_button_hover() {
-                        route.request_redraw();
+                // Selection drags can cross the drawer to reach column zero.
+                let lmb_pressed =
+                    route.window.screen.mouse.left_button_state == ElementState::Pressed;
+                let rmb_pressed =
+                    route.window.screen.mouse.right_button_state == ElementState::Pressed;
+                let is_selecting = (lmb_pressed || rmb_pressed)
+                    && (route.window.screen.modifiers.state().shift_key()
+                        || !route.window.screen.mouse_mode());
+
+                if !is_selecting {
+                    if let Some(cursor) = route.window.screen.workspace_cursor_icon() {
+                        if route.window.screen.clear_close_button_hover() {
+                            route.request_redraw();
+                        }
+                        route.window.winit_window.set_cursor(cursor);
+                        return;
                     }
-                    route.window.winit_window.set_cursor(cursor);
-                    return;
                 }
 
                 if route.window.screen.update_close_button_hover(x, y) {
@@ -1926,11 +1937,6 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 let was_on_border = route.window.screen.mouse.on_border;
                 route.window.screen.mouse.on_border = false;
 
-                let lmb_pressed =
-                    route.window.screen.mouse.left_button_state == ElementState::Pressed;
-                let rmb_pressed =
-                    route.window.screen.mouse.right_button_state == ElementState::Pressed;
-
                 let has_selection = !route.window.screen.selection_is_empty();
                 if has_selection && (lmb_pressed || rmb_pressed) {
                     // Only start the timer when the mouse enters the scroll
@@ -1982,10 +1988,6 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
 
                 // Skip hint/hyperlink highlighting during active selection
                 // drag to avoid unnecessary terminal locks and regex matching.
-                let is_selecting = (lmb_pressed || rmb_pressed)
-                    && (route.window.screen.modifiers.state().shift_key()
-                        || !route.window.screen.mouse_mode());
-
                 if !is_selecting {
                     let hint_changed = route.window.screen.update_highlighted_hints();
                     route
