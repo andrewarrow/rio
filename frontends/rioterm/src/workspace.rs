@@ -2,14 +2,11 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_DRAWER_WIDTH: f32 = 220.0;
-pub const MIN_DRAWER_WIDTH: f32 = 160.0;
-pub const MAX_DRAWER_WIDTH: f32 = 420.0;
+pub const DRAWER_WIDTH: f32 = 160.0;
 pub const DRAWER_HEADER_HEIGHT: f32 = 48.0;
 pub const DRAWER_ROW_TOP: f32 = 51.0;
 pub const DRAWER_ROW_HEIGHT: f32 = 42.0;
 pub const DRAWER_ROW_STRIDE: f32 = 48.0;
-pub const DRAWER_RESIZE_HIT_HALF_WIDTH: f32 = 4.0;
 pub const DRAWER_ADD_HIT_WIDTH: f32 = 44.0;
 
 const DEFAULT_WORKSPACE_NAME: &str = "Main";
@@ -87,7 +84,6 @@ pub struct Workspace {
 pub struct WorkspaceManager {
     workspaces: Vec<Workspace>,
     active: usize,
-    drawer_width: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,7 +115,6 @@ impl WorkspaceManager {
                 selected_tab: 0,
             }],
             active: 0,
-            drawer_width: DEFAULT_DRAWER_WIDTH,
         }
     }
 
@@ -171,7 +166,6 @@ impl WorkspaceManager {
             Self {
                 workspaces,
                 active: active_workspace,
-                drawer_width: DEFAULT_DRAWER_WIDTH,
             },
             tabs,
         ))
@@ -237,16 +231,6 @@ impl WorkspaceManager {
             .unwrap_or_else(|| Path::new(".").to_path_buf())
             .join("rio")
             .join("workspaces.json")
-    }
-
-    #[inline]
-    pub fn drawer_width(&self) -> f32 {
-        self.drawer_width
-    }
-
-    #[inline]
-    pub fn set_drawer_width(&mut self, width: f32) {
-        self.drawer_width = width.clamp(MIN_DRAWER_WIDTH, MAX_DRAWER_WIDTH);
     }
 
     #[inline]

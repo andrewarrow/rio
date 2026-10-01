@@ -1546,7 +1546,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                             && route
                                 .window
                                 .screen
-                                .finish_workspace_drag(&mut self.router.clipboard)
+                                .finish_workspace_interaction(&mut self.router.clipboard)
                         {
                             route.window.winit_window.set_cursor(
                                 route
@@ -1714,18 +1714,12 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
 
                 let scale_factor = route.window.screen.sugarloaf.scale_factor();
                 if route.window.screen.workspace_interaction_active() {
-                    route
-                        .window
-                        .screen
-                        .update_workspace_drawer_width(x as f32 / scale_factor);
                     route.window.screen.update_workspace_row_drag(
                         x as f32 / scale_factor,
                         y as f32 / scale_factor,
                     );
                     route.window.winit_window.set_cursor(
-                        if route.window.screen.workspace_resize_active() {
-                            CursorIcon::ColResize
-                        } else if route.window.screen.workspace_row_drag_active() {
+                        if route.window.screen.workspace_row_drag_active() {
                             CursorIcon::Grabbing
                         } else {
                             CursorIcon::Default

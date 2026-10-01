@@ -1132,13 +1132,12 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
 
     #[inline]
     pub fn drawer_width(&self) -> f32 {
-        self.workspaces.drawer_width()
+        crate::workspace::DRAWER_WIDTH
     }
 
-    pub fn set_drawer_width(&mut self, width: f32, scale: f32) {
-        self.workspaces.set_drawer_width(width);
+    pub fn update_drawer_margin(&mut self, scale: f32) {
         let mut scaled_margin = self.base_scaled_margin;
-        scaled_margin.left += self.workspaces.drawer_width() * scale;
+        scaled_margin.left += self.drawer_width() * scale;
         for grid in &mut self.contexts {
             grid.update_scaled_margin(scaled_margin);
         }

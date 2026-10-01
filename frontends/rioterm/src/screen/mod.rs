@@ -31,9 +31,8 @@ use crate::renderer::{utils::padding_top_from_config, Renderer};
 use crate::screen::hint::HintMatches;
 use crate::selection::{Selection, SelectionType};
 use crate::workspace::{
-    DEFAULT_DRAWER_WIDTH, DRAWER_ADD_HIT_WIDTH, DRAWER_HEADER_HEIGHT,
-    DRAWER_RESIZE_HIT_HALF_WIDTH, DRAWER_ROW_HEIGHT, DRAWER_ROW_STRIDE, DRAWER_ROW_TOP,
-    MAX_DRAWER_WIDTH, MIN_DRAWER_WIDTH,
+    DRAWER_ADD_HIT_WIDTH, DRAWER_HEADER_HEIGHT, DRAWER_ROW_HEIGHT, DRAWER_ROW_STRIDE,
+    DRAWER_ROW_TOP,
 };
 use core::fmt::Debug;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
@@ -104,7 +103,6 @@ pub struct Screen<'screen> {
     /// still refreshes it. Reset on wheel scroll and highlight clears.
     last_hint_probe: Option<(Pos, rio_window::keyboard::ModifiersState)>,
     pub resize_state: Option<crate::layout::ResizeState>,
-    workspace_dragging: bool,
     workspace_consumed: bool,
     workspace_row_drag: Option<WorkspaceRowDrag>,
     #[cfg(target_os = "macos")]
@@ -327,7 +325,7 @@ impl Screen<'_> {
             sugarloaf_errors,
         )?;
 
-        context_manager.set_drawer_width(DEFAULT_DRAWER_WIDTH, scale as f32);
+        context_manager.update_drawer_margin(scale as f32);
         context_manager.resize_all_grids(
             size.width as f32,
             size.height as f32,
@@ -371,7 +369,6 @@ impl Screen<'_> {
             bindings,
             last_ime_cursor_pos: None,
             resize_state: None,
-            workspace_dragging: false,
             workspace_consumed: false,
             workspace_row_drag: None,
             #[cfg(target_os = "macos")]
@@ -2651,16 +2648,11 @@ impl Screen<'_> {
         let x = self.mouse.x as f32 / scale;
         let y = self.mouse.y as f32 / scale;
         let width = self.context_manager.drawer_width();
-        if x > width + DRAWER_RESIZE_HIT_HALF_WIDTH {
+        if x >= width {
             return false;
         }
 
         self.workspace_consumed = true;
-
-        if x >= width - DRAWER_RESIZE_HIT_HALF_WIDTH {
-            self.workspace_dragging = true;
-            return true;
-        }
 
         if y < DRAWER_HEADER_HEIGHT {
             if x >= width - DRAWER_ADD_HIT_WIDTH {
@@ -2726,36 +2718,8 @@ impl Screen<'_> {
         self.mark_dirty();
     }
 
-    pub fn update_workspace_drawer_width(&mut self, x: f32) -> bool {
-        if !self.workspace_dragging {
-            return false;
-        }
-
-        let width = x.clamp(MIN_DRAWER_WIDTH, MAX_DRAWER_WIDTH);
-        let old_width = self.context_manager.drawer_width();
-        if (old_width - width).abs() < f32::EPSILON {
-            return true;
-        }
-
-        let scale = self.sugarloaf.scale_factor();
-        self.context_manager.set_drawer_width(width, scale);
-        let size = self.sugarloaf.window_size();
-        self.context_manager.resize_all_grids(
-            size.width,
-            size.height,
-            &mut self.sugarloaf,
-        );
-        self.refresh_titles();
-        self.mark_dirty();
-        true
-    }
-
     pub fn workspace_interaction_active(&self) -> bool {
         self.workspace_consumed
-    }
-
-    pub fn workspace_resize_active(&self) -> bool {
-        self.workspace_dragging
     }
 
     pub fn workspace_row_drag_active(&self) -> bool {
@@ -2769,11 +2733,8 @@ impl Screen<'_> {
         let x = self.mouse.x as f32 / scale;
         let y = self.mouse.y as f32 / scale;
         let width = self.context_manager.drawer_width();
-        if x > width + DRAWER_RESIZE_HIT_HALF_WIDTH {
+        if x >= width {
             return None;
-        }
-        if x >= width - DRAWER_RESIZE_HIT_HALF_WIDTH {
-            return Some(CursorIcon::ColResize);
         }
         if y < DRAWER_HEADER_HEIGHT && x >= width - DRAWER_ADD_HIT_WIDTH {
             return Some(CursorIcon::Pointer);
@@ -2790,9 +2751,8 @@ impl Screen<'_> {
         Some(CursorIcon::Default)
     }
 
-    pub fn finish_workspace_drag(&mut self, clipboard: &mut Clipboard) -> bool {
-        let was_dragging = self.workspace_consumed;
-        self.workspace_dragging = false;
+    pub fn finish_workspace_interaction(&mut self, clipboard: &mut Clipboard) -> bool {
+        let was_consumed = self.workspace_consumed;
         self.workspace_consumed = false;
         self.renderer.workspace_drop_target = None;
         if let Some(drag) = self.workspace_row_drag.take() {
@@ -2806,7 +2766,7 @@ impl Screen<'_> {
                 self.select_workspace_row(drag.from, clipboard);
             }
         }
-        was_dragging
+        was_consumed
     }
 
     #[inline]

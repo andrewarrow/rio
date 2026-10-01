@@ -22,9 +22,7 @@ use rio_backend::event::TerminalDamage;
 use crate::context::renderable::{PendingUpdate, RenderableContent};
 use crate::context::ContextManager;
 use crate::crosswords::style::{Style as CellStyle, StyleFlags};
-use crate::workspace::{
-    DRAWER_RESIZE_HIT_HALF_WIDTH, DRAWER_ROW_HEIGHT, DRAWER_ROW_STRIDE, DRAWER_ROW_TOP,
-};
+use crate::workspace::{DRAWER_ROW_HEIGHT, DRAWER_ROW_STRIDE, DRAWER_ROW_TOP};
 use rio_backend::config::colors::term::TermColors;
 use rio_backend::config::colors::{
     term::{List, DIM_FACTOR},
@@ -490,18 +488,6 @@ impl Renderer {
                 sugarloaf.line(10.0, y, width - 10.0, y, 2.0, 0.0, plus, 34);
             }
         }
-
-        // The handle remains a small, quiet hit target at the drawer edge.
-        sugarloaf.rect(
-            None,
-            width - DRAWER_RESIZE_HIT_HALF_WIDTH,
-            0.0,
-            DRAWER_RESIZE_HIT_HALF_WIDTH * 2.0,
-            height,
-            [0.0, 0.0, 0.0, 0.001],
-            0.0,
-            33,
-        );
     }
 
     #[inline]
